@@ -1,0 +1,5914 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Burp Suite Vuln tracker Extension
+Automatically highlights HTTP requests that match specified paths/URLs
+"""
+
+from burp import IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMessageEditorTabFactory, IMessageEditorTab
+from java.awt import Component, GridBagLayout, GridBagConstraints, Insets, Color, BorderLayout, Dimension, FlowLayout
+from java.awt.event import ActionListener, MouseAdapter, MouseEvent
+from javax.swing import JPanel, JButton, JTextArea, JScrollPane, JLabel, JSplitPane
+from javax.swing import JMenuItem, JOptionPane, SwingUtilities, JTabbedPane, JComboBox, JPopupMenu
+from javax.swing import JTable, JTextField, ListSelectionModel, Box, BoxLayout, JFileChooser, JCheckBox, JProgressBar
+from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
+from javax.swing.filechooser import FileNameExtensionFilter
+import java.io
+import java.lang
+import re
+import threading
+import json
+import traceback
+import os
+import shutil
+from datetime import datetime
+
+class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMessageEditorTabFactory):
+    
+    def _get_path_without_params(self, url):
+        """Extract the path from URL without query parameters for consistent grouping"""
+        try:
+            if hasattr(url, 'getPath'):
+                path = url.getPath()
+            else:
+                path = str(url)
+            
+            # Remove query parameters (everything after ?)
+            if '?' in path:
+                path = path.split('?')[0]
+            
+            return path
+        except Exception as e:
+            print("Error extracting path: {}".format(str(e)))
+            return str(url)
+    
+    def _create_request_hash(self, url, method):
+        """Create a consistent hash for requests, ignoring query parameters"""
+        try:
+            path = self._get_path_without_params(url)
+            host = ""
+            
+            # Try to get host for more specific grouping
+            if hasattr(url, 'getHost'):
+                host = url.getHost()
+            elif hasattr(url, 'host'):
+                host = url.host
+            
+            # Create hash from method + host + path (without query params)
+            hash_string = "{}:{}{}".format(method, host, path)
+            return hash(hash_string)
+        except Exception as e:
+            print("Error creating request hash: {}".format(str(e)))
+            return hash(str(url) + method)
+    
+    def _highlight_tab_success(self):
+        """Provide visual feedback for successful operations by highlighting the tab"""
+        try:
+            # Get the current tab index (Vuln tracker tab)
+            current_tab_index = self._callbacks.getCustomTabIndex()
+            
+            if current_tab_index >= 0:
+                # Create a brief highlight effect using a timer
+                def highlight_effect():
+                    try:
+                        # Import Timer for delayed execution
+                        from javax.swing import Timer
+                        from java.awt.event import ActionListener
+                        from java.awt import Color
+                        
+                        original_color = None
+                        highlight_count = [0]  # Use list to make it mutable in closure
+                        
+                        class HighlightAction(ActionListener):
+                            def actionPerformed(self, event):
+                                try:
+                                    highlight_count[0] += 1
+                                    
+                                    # Get the tab component
+                                    if hasattr(self, '_main_panel') and self._main_panel.getParent():
+                                        tab_pane = self._main_panel.getParent()
+                                        
+                                        if highlight_count[0] % 2 == 1:
+                                            # Highlight phase - change background
+                                            if hasattr(tab_pane, 'setBackgroundAt'):
+                                                if original_color is None:
+                                                    original_color = tab_pane.getBackgroundAt(current_tab_index) if hasattr(tab_pane, 'getBackgroundAt') else Color.WHITE
+                                                tab_pane.setBackgroundAt(current_tab_index, Color.GREEN.brighter())
+                                        else:
+                                            # Normal phase - restore original
+                                            if hasattr(tab_pane, 'setBackgroundAt') and original_color:
+                                                tab_pane.setBackgroundAt(current_tab_index, original_color)
+                                        
+                                        # Stop after 3 blinks (6 phases)
+                                        if highlight_count[0] >= 6:
+                                            event.getSource().stop()
+                                            # Ensure we end in normal state
+                                            if hasattr(tab_pane, 'setBackgroundAt') and original_color:
+                                                tab_pane.setBackgroundAt(current_tab_index, original_color)
+                                                
+                                except Exception as e:
+                                    print("Error in highlight animation: {}".format(str(e)))
+                                    # Stop the timer on error
+                                    try:
+                                        event.getSource().stop()
+                                    except:
+                                        pass
+                        
+                        # Create and start the timer (200ms intervals for smooth animation)
+                        timer = Timer(200, HighlightAction())
+                        timer.start()
+                        
+                    except Exception as e:
+                        print("Error setting up highlight effect: {}".format(str(e)))
+                        # Fallback: simple status message
+                        self._show_status_feedback()
+                
+                SwingUtilities.invokeLater(highlight_effect)
+            else:
+                # Fallback if we can't get tab index
+                self._show_status_feedback()
+                
+        except Exception as e:
+            print("Error in tab highlighting: {}".format(str(e)))
+            # Fallback to simple status feedback
+            self._show_status_feedback()
+    
+    def _show_status_feedback(self, message=None):
+        """Show status feedback with optional message"""
+        try:
+            if hasattr(self, '_status_label'):
+                if message:
+                    # Show the specific message
+                    original_text = self._status_label.getText()
+                    self._status_label.setText(message)
+                    print("Status: {}".format(message))
+                    
+                    # Create timer to restore original text after 3 seconds
+                    from javax.swing import Timer
+                    from java.awt.event import ActionListener
+                    
+                    class RestoreAction(ActionListener):
+                        def actionPerformed(self, event):
+                            try:
+                                self._status_label.setText(original_text)
+                                event.getSource().stop()
+                            except:
+                                pass
+                    
+                    timer = Timer(3000, RestoreAction())
+                    timer.start()
+                else:
+                    # Fallback visual feedback using status label
+                    original_text = self._status_label.getText()
+                    
+                    # Temporarily change status text to show success
+                    self._status_label.setText("✓ Action completed successfully!")
+                    
+                    # Create timer to restore original text after 2 seconds
+                    from javax.swing import Timer
+                    from java.awt.event import ActionListener
+                    
+                    class RestoreAction(ActionListener):
+                        def actionPerformed(self, event):
+                            try:
+                                self._status_label.setText(original_text)
+                                event.getSource().stop()
+                            except:
+                                pass
+                    
+                    timer = Timer(2000, RestoreAction())
+                    timer.start()
+            else:
+                print("Status feedback: {}".format(message if message else "Action completed"))
+                
+        except Exception as e:
+            print("Error showing status feedback: {}".format(str(e)))
+            if message:
+                print("Intended message: {}".format(message))
+    
+    def _init_database(self):
+        """Initialize JSON file for persistent storage with project mapping"""
+        try:
+            # Initialize project management
+            self._init_project_mapping()
+            
+            # Use current project's data file
+            self._data_file_path = self._get_current_project_data_file()
+            print("Data will be stored at: {}".format(self._data_file_path))
+            
+            # Create initial data structure if file doesn't exist
+            if not os.path.exists(self._data_file_path):
+                initial_data = {
+                    "vulnerabilities": {},
+                    "watch_list_audit": [],
+                    "settings": {
+                        "project_name": self._current_project_name
+                    },
+                    "vuln_counter": 0
+                }
+                try:
+                    # Ensure directory exists (Jython-compatible way)
+                    data_dir = os.path.dirname(self._data_file_path)
+                    if not os.path.exists(data_dir):
+                        try:
+                            os.makedirs(data_dir)
+                        except OSError:
+                            pass  # Directory might already exist
+                    self._save_data_to_file(initial_data)
+                except Exception as save_error:
+                    print("Error creating initial data file: {}".format(str(save_error)))
+                    # Try fallback location
+                    self._data_file_path = os.path.join(os.getcwd(), "path_highlighter_data.json")
+                    print("Using fallback location: {}".format(self._data_file_path))
+                    self._save_data_to_file(initial_data)
+            
+            print("Data storage initialized successfully for project: {}".format(self._current_project_name))
+            
+        except Exception as e:
+            print("Error initializing data storage: {}".format(str(e)))
+            traceback.print_exc()
+            # Fallback to current directory
+            self._data_file_path = os.path.join(os.getcwd(), "path_highlighter_data.json")
+            print("Using fallback data file path: {}".format(self._data_file_path))
+    
+    def _init_project_mapping(self):
+        """Initialize project mapping system"""
+        try:
+            # Get project mapping file location
+            user_home = os.path.expanduser("~")
+            burp_dir = os.path.join(user_home, ".BurpSuite")
+            
+            # Create directory if it doesn't exist (Jython-compatible way)
+            if not os.path.exists(burp_dir):
+                try:
+                    os.makedirs(burp_dir)
+                except OSError:
+                    pass  # Directory might already exist
+            
+            self._project_mapping_file = os.path.join(burp_dir, "path_highlighter_projects.json")
+            
+            # Load existing project mappings
+            self._project_mappings = self._load_project_mappings()
+            
+            # Auto-detect current Burp project name
+            self._current_project_name = self._detect_current_burp_project()
+            
+            print("Project mapping initialized. Current project: '{}'. Available projects: {}".format(
+                self._current_project_name, list(self._project_mappings.keys())))
+            
+        except Exception as e:
+            print("Error initializing project mapping: {}".format(str(e)))
+            self._project_mappings = {}
+            self._current_project_name = "default"
+            # Set fallback project mapping file
+            self._project_mapping_file = os.path.join(os.getcwd(), "path_highlighter_projects.json")
+    
+    def _detect_current_burp_project(self):
+        """Detect or prompt for current Burp project name and data file location"""
+        try:
+            print("Determining current Burp project...")
+            
+            # Method 1: Check if there are existing projects - use the most recent one
+            if self._project_mappings:
+                # Find the most recently used project
+                most_recent_project = None
+                most_recent_time = None
+                
+                for project_name, project_info in self._project_mappings.items():
+                    last_used = project_info.get("last_used", "")
+                    if last_used:
+                        try:
+                            # Parse the timestamp
+                            from datetime import datetime
+                            time_obj = datetime.strptime(last_used, "%Y-%m-%d %H:%M:%S")
+                            if most_recent_time is None or time_obj > most_recent_time:
+                                most_recent_time = time_obj
+                                most_recent_project = project_name
+                        except:
+                            continue
+                
+                if most_recent_project:
+                    print("Found existing projects. Most recent: '{}'".format(most_recent_project))
+                    
+                    # Ask user if they want to use the most recent project or create a new one
+                    choice = self._ask_project_choice(most_recent_project)
+                    
+                    if choice == "use_recent":
+                        print("User chose to use recent project: '{}'".format(most_recent_project))
+                        return most_recent_project
+                    elif choice == "select_existing":
+                        # Let user select from existing projects
+                        selected_project = self._select_existing_project()
+                        if selected_project:
+                            print("User selected existing project: '{}'".format(selected_project))
+                            return selected_project
+                    # If choice is "create_new" or selection failed, continue to create new project
+            
+            # Method 2: No existing projects or user wants to create new - prompt for project setup
+            print("Setting up new project...")
+            project_info = self._prompt_for_new_project_setup()
+            
+            if project_info:
+                project_name = project_info["name"]
+                data_file_path = project_info["data_file"]
+                
+                # Create new project entry
+                self._create_new_project_entry_with_path(project_name, data_file_path)
+                
+                print("New project created: '{}' -> '{}'".format(project_name, data_file_path))
+                return project_name
+            
+            # Fallback - create a default project with prompted location
+            print("Creating fallback project...")
+            return self._create_fallback_project()
+            
+        except Exception as e:
+            print("Error detecting Burp project: {}".format(str(e)))
+            return self._create_emergency_fallback()
+    
+    def _ask_project_choice(self, most_recent_project):
+        """Ask user what they want to do with existing projects"""
+        try:
+            from javax.swing import JOptionPane, JPanel, JLabel, JRadioButton, ButtonGroup
+            from java.awt import GridLayout
+            
+            # Create radio button panel
+            panel = JPanel(GridLayout(6, 1))
+            panel.add(JLabel("Existing projects found!"))
+            panel.add(JLabel("Most recent project: '{}'".format(most_recent_project)))
+            panel.add(JLabel("What would you like to do?"))
+            
+            # Radio buttons
+            use_recent_radio = JRadioButton("Use most recent project ('{}')".format(most_recent_project), True)
+            select_existing_radio = JRadioButton("Select from existing projects")
+            create_new_radio = JRadioButton("Create a new project")
+            
+            # Group the radio buttons
+            button_group = ButtonGroup()
+            button_group.add(use_recent_radio)
+            button_group.add(select_existing_radio)
+            button_group.add(create_new_radio)
+            
+            panel.add(use_recent_radio)
+            panel.add(select_existing_radio)
+            panel.add(create_new_radio)
+            
+            result = JOptionPane.showConfirmDialog(
+                None,
+                panel,
+                "Project Selection",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.OK_OPTION:
+                if use_recent_radio.isSelected():
+                    return "use_recent"
+                elif select_existing_radio.isSelected():
+                    return "select_existing"
+                elif create_new_radio.isSelected():
+                    return "create_new"
+            
+            # Default to using recent if cancelled or no selection
+            return "use_recent"
+            
+        except Exception as e:
+            print("Error in project choice dialog: {}".format(str(e)))
+            return "use_recent"
+    
+    def _select_existing_project(self):
+        """Let user select from existing projects"""
+        try:
+            from javax.swing import JOptionPane
+            
+            # Get list of existing projects
+            project_names = list(self._project_mappings.keys())
+            if not project_names:
+                return None
+            
+            # Show selection dialog
+            selected = JOptionPane.showInputDialog(
+                None,
+                "Select an existing project:",
+                "Select Project",
+                JOptionPane.QUESTION_MESSAGE,
+                None,
+                project_names,
+                project_names[0]
+            )
+            
+            return str(selected) if selected else None
+            
+        except Exception as e:
+            print("Error selecting existing project: {}".format(str(e)))
+            return None
+    
+    def _prompt_for_new_project_setup(self):
+        """Prompt user for new project name and data file location"""
+        try:
+            from javax.swing import JOptionPane, JTextField, JPanel, JLabel, JButton, JFileChooser
+            from javax.swing.filechooser import FileNameExtensionFilter
+            from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
+            import java.io
+            
+            # Create setup dialog
+            dialog_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            
+            # Project name section
+            gbc.gridx = 0
+            gbc.gridy = 0
+            gbc.anchor = GridBagConstraints.WEST
+            gbc.insets = Insets(5, 5, 5, 5)
+            dialog_panel.add(JLabel("Project Name:"), gbc)
+            
+            project_name_field = JTextField("testA", 20)
+            gbc.gridx = 1
+            dialog_panel.add(project_name_field, gbc)
+            
+            # Data file location section
+            gbc.gridx = 0
+            gbc.gridy = 1
+            dialog_panel.add(JLabel("Data File Location:"), gbc)
+            
+            # Container for file path and browse button
+            file_panel = JPanel(BorderLayout())
+            file_path_field = JTextField(30)
+            file_path_field.setEditable(False)
+            
+            # Set default location suggestion
+            default_location = os.path.join(os.path.expanduser("~"), "Documents", "testA_data.json")
+            file_path_field.setText(default_location)
+            
+            browse_button = JButton("Browse...")
+            
+            def browse_action(e):
+                file_chooser = JFileChooser()
+                file_chooser.setDialogTitle("Choose Data File Location")
+                file_chooser.setFileSelectionMode(JFileChooser.FILES_ONLY)
+                
+                # Add JSON filter
+                json_filter = FileNameExtensionFilter("JSON Data Files (*.json)", ["json"])
+                file_chooser.setFileFilter(json_filter)
+                
+                # Set suggested filename based on project name
+                current_project_name = project_name_field.getText().strip()
+                if current_project_name:
+                    suggested_name = "{}_data.json".format(current_project_name.replace(" ", "_"))
+                    suggested_path = os.path.join(os.path.expanduser("~"), "Documents", suggested_name)
+                    file_chooser.setSelectedFile(java.io.File(suggested_path))
+                
+                if file_chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+                    selected_file = file_chooser.getSelectedFile().getAbsolutePath()
+                    
+                    # Ensure .json extension
+                    if not selected_file.lower().endswith('.json'):
+                        selected_file += '.json'
+                    
+                    file_path_field.setText(selected_file)
+            
+            browse_button.addActionListener(browse_action)
+            
+            file_panel.add(file_path_field, BorderLayout.CENTER)
+            file_panel.add(browse_button, BorderLayout.EAST)
+            
+            gbc.gridx = 1
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            dialog_panel.add(file_panel, gbc)
+            
+            # Instructions
+            gbc.gridx = 0
+            gbc.gridy = 2
+            gbc.gridwidth = 2
+            gbc.insets = Insets(15, 5, 5, 5)
+            instructions = JLabel("Choose a project name and location to save your data. This will be remembered for future sessions.")
+            dialog_panel.add(instructions, gbc)
+            
+            # Show dialog
+            result = JOptionPane.showConfirmDialog(
+                None,
+                dialog_panel,
+                "New Project Setup",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.OK_OPTION:
+                project_name = project_name_field.getText().strip()
+                data_file_path = file_path_field.getText().strip()
+                
+                if project_name and data_file_path:
+                    return {
+                        "name": project_name,
+                        "data_file": data_file_path
+                    }
+                else:
+                    JOptionPane.showMessageDialog(
+                        None,
+                        "Please provide both project name and data file location.",
+                        "Missing Information",
+                        JOptionPane.WARNING_MESSAGE
+                    )
+                    return None
+            
+            return None
+            
+        except Exception as e:
+            print("Error in new project setup: {}".format(str(e)))
+            return None
+    
+    def _create_new_project_entry_with_path(self, project_name, data_file_path):
+        """Create a new project entry with specified path"""
+        try:
+            safe_project_name = project_name.replace(" ", "_").replace("-", "_")
+            
+            self._project_mappings[safe_project_name] = {
+                "data_file": data_file_path,
+                "description": "Project: {}".format(project_name),
+                "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_used": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            self._save_project_mappings()
+            print("Created new project entry: {} -> {}".format(safe_project_name, data_file_path))
+            
+            return safe_project_name
+            
+        except Exception as e:
+            print("Error creating new project entry: {}".format(str(e)))
+            return None
+    
+    def _create_fallback_project(self):
+        """Create a fallback project with user-selected location"""
+        try:
+            from javax.swing import JFileChooser, JOptionPane
+            from javax.swing.filechooser import FileNameExtensionFilter
+            import java.io
+            
+            # Ask for data file location
+            file_chooser = JFileChooser()
+            file_chooser.setDialogTitle("Choose Location for Data File")
+            file_chooser.setFileSelectionMode(JFileChooser.FILES_ONLY)
+            
+            # Add JSON filter
+            json_filter = FileNameExtensionFilter("JSON Data Files (*.json)", ["json"])
+            file_chooser.setFileFilter(json_filter)
+            
+            # Set default location
+            default_location = os.path.join(os.path.expanduser("~"), "Documents", "burp_project_data.json")
+            file_chooser.setSelectedFile(java.io.File(default_location))
+            
+            if file_chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+                selected_file = file_chooser.getSelectedFile().getAbsolutePath()
+                
+                # Ensure .json extension
+                if not selected_file.lower().endswith('.json'):
+                    selected_file += '.json'
+                
+                # Create project with timestamp name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+                project_name = "project_{}".format(timestamp)
+                
+                self._create_new_project_entry_with_path(project_name, selected_file)
+                
+                return project_name
+            
+            return self._create_emergency_fallback()
+            
+        except Exception as e:
+            print("Error creating fallback project: {}".format(str(e)))
+            return self._create_emergency_fallback()
+    
+    def _create_emergency_fallback(self):
+        """Emergency fallback - create project in current directory"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            project_name = "emergency_{}".format(timestamp)
+            data_file = os.path.join(os.getcwd(), "path_highlighter_data.json")
+            
+            self._create_new_project_entry_with_path(project_name, data_file)
+            
+            print("Created emergency fallback project: {} -> {}".format(project_name, data_file))
+            return project_name
+            
+        except Exception as e:
+            print("Emergency fallback failed: {}".format(str(e)))
+            return "default"
+    
+    def _rename_current_project(self, new_name):
+        """Rename the current project and update all associated files"""
+        try:
+            old_name = self._current_project_name
+            safe_new_name = new_name.replace(' ', '_').replace('-', '_')
+            
+            if old_name == safe_new_name:
+                print("Project name unchanged")
+                return True
+            
+            if safe_new_name in self._project_mappings:
+                print("Project name '{}' already exists".format(safe_new_name))
+                return False
+            
+            # Update project identifier file
+            self._save_project_identifier(safe_new_name)
+            
+            # Create new project entry with new name
+            old_data_file = self._data_file_path
+            new_data_file = self._create_new_project_entry(safe_new_name)
+            
+            # Copy data from old file to new file if it exists
+            if os.path.exists(old_data_file):
+                try:
+                    data = self._load_data_from_file()
+                    # Update settings in data
+                    if "settings" not in data:
+                        data["settings"] = {}
+                    data["settings"]["project_name"] = safe_new_name
+                    
+                    # Update the data file path and save
+                    old_path = self._data_file_path
+                    self._data_file_path = new_data_file
+                    self._save_data_to_file(data)
+                    self._data_file_path = old_path  # Restore for cleanup
+                    
+                    print("Data copied from '{}' to '{}'".format(old_data_file, new_data_file))
+                except Exception as copy_error:
+                    print("Error copying data to new project file: {}".format(str(copy_error)))
+            
+            # Remove old project entry
+            if old_name in self._project_mappings and old_name != "default":
+                del self._project_mappings[old_name]
+                self._save_project_mappings()
+                print("Removed old project entry: '{}'".format(old_name))
+            
+            # Update current project references
+            self._current_project_name = safe_new_name
+            self._data_file_path = new_data_file
+            
+            # Reload GUI with new project name
+            self._update_gui_with_loaded_data()
+            
+            print("Successfully renamed project from '{}' to '{}'".format(old_name, safe_new_name))
+            return True
+            
+        except Exception as e:
+            print("Error renaming project: {}".format(str(e)))
+            return False
+    
+    def _load_project_mappings(self):
+        """Load project mappings from config file"""
+        try:
+            if not os.path.exists(self._project_mapping_file):
+                # Start with empty mappings - projects will be created on demand
+                print("No existing project mappings found. Will create on first use.")
+                return {}
+            
+            with open(self._project_mapping_file, 'r') as f:
+                mappings = json.load(f)
+                
+            print("Loaded {} existing project(s)".format(len(mappings)))
+            return mappings
+            
+        except Exception as e:
+            print("Error loading project mappings: {}".format(str(e)))
+            # Return empty mappings - projects will be created on demand
+            return {}
+    
+    def _save_project_mappings(self, mappings=None):
+        """Save project mappings to config file"""
+        try:
+            if mappings is None:
+                mappings = self._project_mappings
+                
+            with open(self._project_mapping_file, 'w') as f:
+                json.dump(mappings, f, indent=2)
+                
+        except Exception as e:
+            print("Error saving project mappings: {}".format(str(e)))
+    
+    def _get_current_project_data_file(self):
+        """Get the data file path for the current project"""
+        try:
+            if self._current_project_name in self._project_mappings:
+                data_file = self._project_mappings[self._current_project_name]["data_file"]
+                # Update last used timestamp
+                self._project_mappings[self._current_project_name]["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save_project_mappings()
+                return data_file
+            else:
+                # Create new project entry
+                return self._create_new_project_entry(self._current_project_name)
+                
+        except Exception as e:
+            print("Error getting current project data file: {}".format(str(e)))
+            # Fallback
+            return os.path.join(os.path.expanduser("~"), ".BurpSuite", "path_highlighter_data_default.json")
+    
+    def _create_new_project_entry(self, project_name, custom_path=None):
+        """Create a new project entry in the mapping"""
+        try:
+            if custom_path:
+                data_file_path = custom_path
+            else:
+                # If no custom path provided, ask user for location
+                from javax.swing import JFileChooser, JOptionPane
+                from javax.swing.filechooser import FileNameExtensionFilter
+                import java.io
+                
+                file_chooser = JFileChooser()
+                file_chooser.setDialogTitle("Choose Location for Data File")
+                file_chooser.setFileSelectionMode(JFileChooser.FILES_ONLY)
+                
+                # Add JSON filter
+                json_filter = FileNameExtensionFilter("JSON Data Files (*.json)", ["json"])
+                file_chooser.setFileFilter(json_filter)
+                
+                # Set suggested filename
+                safe_project_name = project_name.replace(" ", "_").replace("-", "_")
+                suggested_name = "{}_data.json".format(safe_project_name)
+                suggested_path = os.path.join(os.path.expanduser("~"), "Documents", suggested_name)
+                file_chooser.setSelectedFile(java.io.File(suggested_path))
+                
+                if file_chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+                    data_file_path = file_chooser.getSelectedFile().getAbsolutePath()
+                    
+                    # Ensure .json extension
+                    if not data_file_path.lower().endswith('.json'):
+                        data_file_path += '.json'
+                else:
+                    # User cancelled, use default location
+                    user_home = os.path.expanduser("~")
+                    data_file_path = os.path.join(user_home, "Documents", "{}_data.json".format(safe_project_name))
+            
+            safe_project_name = project_name.replace(" ", "_").replace("-", "_")
+            
+            self._project_mappings[safe_project_name] = {
+                "data_file": data_file_path,
+                "description": "Project: {}".format(project_name),
+                "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_used": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            self._save_project_mappings()
+            print("Created new project entry: {} -> {}".format(safe_project_name, data_file_path))
+            
+            return data_file_path
+            
+        except Exception as e:
+            print("Error creating new project entry: {}".format(str(e)))
+            # Fallback
+            return os.path.join(os.path.expanduser("~"), "Documents", "path_highlighter_data_default.json")
+    
+    def _switch_project(self, project_name):
+        """Switch to a different project"""
+        try:
+            if project_name not in self._project_mappings:
+                print("Project '{}' not found in mappings".format(project_name))
+                return False
+            
+            # Save current data if needed
+            if hasattr(self, '_data_file_path') and self._data_file_path:
+                print("Switching from project '{}' to '{}'".format(self._current_project_name, project_name))
+                # Save current project data before switching
+                try:
+                    self._save_watch_list_to_database()
+                    print("Saved current project data before switch")
+                except Exception as save_error:
+                    print("Warning: Could not save current project data: {}".format(str(save_error)))
+            
+            # Switch to new project
+            old_project = self._current_project_name
+            self._current_project_name = project_name
+            self._data_file_path = self._get_current_project_data_file()
+            
+            # Set flag to prevent saving during project switch
+            self._is_updating_gui = True
+            print("Project switch started - saving disabled")
+            
+            # Clear current data before loading new project data
+            with self._vuln_lock:
+                self._vulnerabilities = {}
+                self._vuln_counter = 0
+            
+            # Clear all project-specific data including watch list and configuration
+            self._data = {
+                "vulnerabilities": {},
+                "watch_list_audit": [],
+                "settings": {},
+                "vuln_counter": 0
+            }
+            
+            # Reset auto-audit settings to defaults
+            self._auto_audit_repeater_enabled = True
+            self._auto_audit_scanner_enabled = True
+            self._sitemap_config = None
+            
+            print("Cleared all data for project switch. Loading new project data...")
+            
+            # Reload data from new project
+            self._load_data_from_database()
+            
+            # Update GUI with a small delay to ensure data is fully loaded
+            def update_gui_delayed():
+                try:
+                    self._update_gui_with_loaded_data()
+                    print("GUI update completed after project switch")
+                except Exception as gui_error:
+                    print("Error updating GUI after project switch: {}".format(str(gui_error)))
+                    # Ensure flag is cleared even if GUI update fails
+                    self._is_updating_gui = False
+                    print("Saving re-enabled after GUI update error")
+            
+            # Use SwingUtilities to ensure GUI updates happen on the Event Dispatch Thread
+            SwingUtilities.invokeLater(update_gui_delayed)
+            
+            # Verify the switch was successful
+            path_count = len(self._data.get('watch_list_audit', [])) if hasattr(self, '_data') else 0
+            vuln_count = len(self._vulnerabilities)
+            print("Project switch verification:")
+            print("  - Current project: {}".format(self._current_project_name))
+            print("  - Data file: {}".format(self._data_file_path))
+            print("  - Paths loaded: {}".format(path_count))
+            print("  - Vulnerabilities loaded: {}".format(vuln_count))
+            print("  - Auto-audit Repeater: {}".format(self._auto_audit_repeater_enabled))
+            print("  - Auto-audit Scanner: {}".format(self._auto_audit_scanner_enabled))
+            
+            # Debug: Print sample data if available
+            if hasattr(self, '_data') and self._data.get('watch_list_audit'):
+                sample_item = self._data['watch_list_audit'][0] if self._data['watch_list_audit'] else None
+                if sample_item:
+                    print("  - Sample audit item: {}".format(sample_item))
+            
+            print("Successfully switched to project: {}".format(project_name))
+            return True
+            
+        except Exception as e:
+            print("Error switching project: {}".format(str(e)))
+            return False
+    
+    def _load_data_from_database(self):
+        """Load existing vulnerabilities and watch paths from JSON file"""
+        try:
+            print("Loading data from: {}".format(self._data_file_path))
+            
+            # Load data using the robust method
+            data = self._load_data_from_file()
+            
+            if not data:
+                print("No data loaded, using defaults")
+                # Initialize empty data structure
+                self._data = {
+                    "vulnerabilities": {},
+                    "watch_list_audit": [],
+                    "settings": {},
+                    "vuln_counter": 0
+                }
+                return
+            
+            # Store the loaded data for GUI access
+            self._data = data
+            
+            # Load vulnerabilities
+            vulnerabilities_data = data.get("vulnerabilities", {})
+            loaded_vuln_count = 0
+            
+            with self._vuln_lock:
+                for vuln_id_str, vuln in vulnerabilities_data.items():
+                    try:
+                        vuln_id = int(vuln_id_str)
+                        self._vulnerabilities[vuln_id] = {
+                            'cwe': vuln.get('cwe', 'Unknown'),
+                            'description': vuln.get('description', 'No description'),
+                            'url': vuln.get('url', ''),
+                            'method': vuln.get('method', 'GET'),
+                            'timestamp': vuln.get('timestamp', ''),
+                            'request_hash': vuln.get('request_hash', 0),
+                            'message': None  # Message objects can't be persisted
+                        }
+                        # Update counter to avoid ID conflicts
+                        if vuln_id > self._vuln_counter:
+                            self._vuln_counter = vuln_id
+                        loaded_vuln_count += 1
+                    except Exception as vuln_error:
+                        print("Error loading vulnerability {}: {}".format(vuln_id_str, str(vuln_error)))
+            
+            # Load paths - use watch_list_audit as the only source
+            loaded_paths_count = 0
+            
+            # Load from watch_list_audit (primary and only source)
+            watch_list_audit = data.get("watch_list_audit", [])
+            if watch_list_audit and isinstance(watch_list_audit, list):
+                loaded_paths_count = len(watch_list_audit)
+                print("Loaded {} paths from watch_list_audit".format(loaded_paths_count))
+            else:
+                # Fallback 1: Try path_list and migrate to watch_list_audit
+                path_list_data = data.get("path_list", [])
+                if path_list_data and isinstance(path_list_data, list):
+                    # Migrate path_list to watch_list_audit format
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    data['watch_list_audit'] = []
+                    for path in path_list_data:
+                        if path:  # Only add non-empty paths
+                            data['watch_list_audit'].append({
+                                'path': str(path),
+                                'manual_audited': False,
+                                'scanned': False,
+                                'last_audit': 'Never',
+                                'highlight': False
+                            })
+                    
+                    loaded_paths_count = len(data['watch_list_audit'])
+                    print("Migrated {} paths from path_list to watch_list_audit".format(loaded_paths_count))
+                    
+                    # Remove old path_list after migration
+                    del data['path_list']
+                    
+                    # Save the migrated data
+                    try:
+                        self._save_data_to_file(data)
+                        print("Saved migrated audit data to file")
+                    except Exception as save_error:
+                        print("Error saving migrated audit data: {}".format(str(save_error)))
+                        
+                else:
+                    # Fallback 2: Try legacy watch_paths format (for very old data files)
+                    watch_paths_data = data.get("watch_paths", [])
+                    if watch_paths_data and isinstance(watch_paths_data, list):
+                        # Migrate watch_paths to watch_list_audit format
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        data['watch_list_audit'] = []
+                        for path in watch_paths_data:
+                            if path:  # Only add non-empty paths
+                                data['watch_list_audit'].append({
+                                    'path': str(path),
+                                    'manual_audited': False,
+                                    'scanned': False,
+                                    'last_audit': 'Never',
+                                    'highlight': False
+                                })
+                        
+                        loaded_paths_count = len(data['watch_list_audit'])
+                        print("Migrated {} paths from watch_paths to watch_list_audit".format(loaded_paths_count))
+                        
+                        # Remove old watch_paths after migration
+                        if "watch_paths" in data:
+                            del data["watch_paths"]
+                        
+                        # Save the migrated data
+                        try:
+                            self._save_data_to_file(data)
+                            print("Saved migrated legacy data to file")
+                        except Exception as save_error:
+                            print("Error saving migrated legacy data: {}".format(str(save_error)))
+                
+                # Update watch_list_audit variable after migration
+                watch_list_audit = data.get("watch_list_audit", [])
+            
+            # Store the final audit data in self._data
+            self._data['watch_list_audit'] = watch_list_audit
+            
+            # Load vuln counter
+            self._vuln_counter = max(self._vuln_counter, data.get("vuln_counter", 0))
+            
+            # Load auto-audit settings
+            settings = data.get("settings", {})
+            if "auto_audit_enabled" in settings:
+                # Legacy setting - apply to both if new settings don't exist
+                legacy_setting = settings["auto_audit_enabled"]
+                self._auto_audit_repeater_enabled = settings.get("auto_audit_repeater_enabled", legacy_setting)
+                self._auto_audit_scanner_enabled = settings.get("auto_audit_scanner_enabled", legacy_setting)
+                print("Loaded auto-audit settings - Repeater: {}, Scanner: {}".format(
+                    self._auto_audit_repeater_enabled, self._auto_audit_scanner_enabled))
+            else:
+                # Load individual settings
+                self._auto_audit_repeater_enabled = settings.get("auto_audit_repeater_enabled", True)
+                self._auto_audit_scanner_enabled = settings.get("auto_audit_scanner_enabled", True)
+                print("Loaded auto-audit settings - Repeater: {}, Scanner: {}".format(
+                    self._auto_audit_repeater_enabled, self._auto_audit_scanner_enabled))
+            
+            # Load sitemap configuration if available
+            sitemap_config = settings.get("sitemap_config", None)
+            if sitemap_config and sitemap_config.get("auto_update", False):
+                self._sitemap_config = sitemap_config
+                print("Loaded sitemap auto-update config for target: {}".format(sitemap_config.get('target', 'unknown')))
+                # Start monitoring after GUI is created
+            
+            print("Successfully loaded {} vulnerabilities and {} paths from data file".format(
+                loaded_vuln_count, loaded_paths_count))
+            
+            # Debug: Check if we have audit data
+            if 'watch_list_audit' in data:
+                print("Found {} items in watch_list_audit".format(len(data['watch_list_audit'])))
+            else:
+                print("No watch_list_audit found in data")
+            
+        except Exception as e:
+            print("Error loading data from file: {}".format(str(e)))
+            traceback.print_exc()
+            # Initialize with empty data on error
+            with self._vuln_lock:
+                self._vulnerabilities = {}
+                self._vuln_counter = 0
+            # Initialize empty data structure
+            self._data = {
+                "vulnerabilities": {},
+                "watch_list_audit": [],
+                "settings": {},
+                "vuln_counter": 0
+            }
+    
+    def _save_data_to_file(self, data):
+        """Save data to JSON file with timeout protection"""
+        try:
+            # Use a temporary file for atomic writes
+            temp_path = self._data_file_path + ".tmp"
+            
+            with open(temp_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            # Atomic move (on Windows this might need special handling)
+            try:
+                if os.path.exists(self._data_file_path):
+                    os.remove(self._data_file_path)
+                os.rename(temp_path, self._data_file_path)
+            except Exception as move_error:
+                print("Error moving temp file: {}".format(str(move_error)))
+                # Fallback: copy content
+                import shutil
+                shutil.move(temp_path, self._data_file_path)
+                
+        except Exception as e:
+            print("Error saving data to file: {}".format(str(e)))
+            # Clean up temp file if it exists
+            temp_path = self._data_file_path + ".tmp"
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+    
+    def _load_data_from_file(self):
+        """Load current data from JSON file with error recovery"""
+        try:
+            if not os.path.exists(self._data_file_path):
+                print("Data file does not exist, returning default data")
+                return {
+                    "vulnerabilities": {},
+                    "watch_list_audit": [],
+                    "settings": {},
+                    "vuln_counter": 0
+                }
+            
+            # Check if file is readable
+            if not os.access(self._data_file_path, os.R_OK):
+                print("Data file is not readable, returning default data")
+                return {
+                    "vulnerabilities": {},
+                    "watch_list_audit": [],
+                    "settings": {},
+                    "vuln_counter": 0
+                }
+                
+            with open(self._data_file_path, 'r') as f:
+                data = json.load(f)
+                
+            # Validate data structure
+            if not isinstance(data, dict):
+                print("Invalid data format, returning default data")
+                return {
+                    "vulnerabilities": {},
+                    "watch_list_audit": [],
+                    "settings": {},
+                    "vuln_counter": 0
+                }
+                
+            # Ensure required keys exist
+            default_data = {
+                "vulnerabilities": {},
+                "watch_list_audit": [],
+                "settings": {},
+                "vuln_counter": 0
+            }
+            
+            for key, default_value in default_data.items():
+                if key not in data:
+                    data[key] = default_value
+            
+            # Migration: if we have path_list but no watch_list_audit, create audit data
+            if data.get('path_list') and not data.get('watch_list_audit'):
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                data['watch_list_audit'] = []
+                for path in data['path_list']:
+                    data['watch_list_audit'].append({
+                        'path': path,
+                        'manual_audited': False,
+                        'scanned': False,
+                        'last_audit': 'Never',
+                        'highlight': False
+                    })
+                print("Migrated {} paths to watch_list_audit format".format(len(data['path_list'])))
+                
+                # Remove old path_list after migration
+                del data['path_list']
+                
+                # Save the migrated data immediately
+                try:
+                    self._save_data_to_file(data)
+                    print("Saved migrated data to file")
+                except Exception as save_error:
+                    print("Error saving migrated data: {}".format(str(save_error)))
+            
+            # Validate and repair watch_list_audit data structure
+            if data.get('watch_list_audit'):
+                watch_list_audit = data['watch_list_audit']
+                repaired_items = []
+                needs_repair = False
+                
+                for i, item in enumerate(watch_list_audit):
+                    if isinstance(item, str):
+                        # Old format: just path strings, convert to full structure
+                        repaired_items.append({
+                            'path': item,
+                            'manual_audited': False,
+                            'scanned': False,
+                            'last_audit': 'Never',
+                            'highlight': False
+                        })
+                        needs_repair = True
+                        print("Repaired string item '{}' to full audit structure".format(item))
+                    elif isinstance(item, dict):
+                        # Validate required fields and add missing ones
+                        required_fields = {
+                            'path': '',
+                            'manual_audited': False,
+                            'scanned': False,
+                            'last_audit': 'Never',
+                            'highlight': False
+                        }
+                        
+                        repaired_item = {}
+                        for field, default_value in required_fields.items():
+                            if field in item:
+                                repaired_item[field] = item[field]
+                            else:
+                                repaired_item[field] = default_value
+                                needs_repair = True
+                                print("Added missing field '{}' to item '{}'".format(field, item.get('path', 'unknown')))
+                        
+                        repaired_items.append(repaired_item)
+                    else:
+                        print("Skipping invalid item type in watch_list_audit: {}".format(type(item)))
+                        needs_repair = True
+                
+                if needs_repair:
+                    data['watch_list_audit'] = repaired_items
+                    print("Repaired {} items in watch_list_audit, saving changes...".format(len(repaired_items)))
+                    try:
+                        self._save_data_to_file(data)
+                        print("Saved repaired audit data to file")
+                    except Exception as save_error:
+                        print("Error saving repaired audit data: {}".format(str(save_error)))
+                else:
+                    print("watch_list_audit data structure is valid, no repairs needed")
+                    
+            return data
+            
+        except Exception as e:
+            print("Error loading data from file: {}".format(str(e)))
+            return {
+                "vulnerabilities": {},
+                "watch_list_audit": [],
+                "settings": {},
+                "vuln_counter": 0
+            }
+    
+    def _save_vulnerability_to_database(self, vuln_id, vulnerability):
+        """Save a single vulnerability to JSON file"""
+        try:
+            data = self._load_data_from_file()
+            
+            # Update vulnerabilities
+            data["vulnerabilities"][str(vuln_id)] = {
+                'cwe': vulnerability['cwe'],
+                'description': vulnerability['description'],
+                'url': vulnerability['url'],
+                'method': vulnerability['method'],
+                'timestamp': vulnerability['timestamp'],
+                'request_hash': vulnerability['request_hash']
+            }
+            
+            # Update counter
+            data["vuln_counter"] = max(data.get("vuln_counter", 0), vuln_id)
+            
+            self._save_data_to_file(data)
+            
+        except Exception as e:
+            print("Error saving vulnerability to file: {}".format(str(e)))
+    
+    def _remove_vulnerability_from_database(self, vuln_id):
+        """Remove a vulnerability from JSON file"""
+        try:
+            data = self._load_data_from_file()
+            
+            # Remove vulnerability
+            if str(vuln_id) in data["vulnerabilities"]:
+                del data["vulnerabilities"][str(vuln_id)]
+            
+            self._save_data_to_file(data)
+            
+        except Exception as e:
+            print("Error removing vulnerability from file: {}".format(str(e)))
+    
+    def _save_watch_list_to_database(self):
+        """Save current watch list audit data to JSON file"""
+        try:
+            # Get current audit data and save it
+            if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                data = self._load_data_from_file()
+                
+                # Update from current audit data
+                data["watch_list_audit"] = self._data['watch_list_audit']
+                
+                # Save data
+                self._save_data_to_file(data)
+            else:
+                print("No watch_list_audit data available to save")
+            
+        except Exception as e:
+            print("Error saving watch list to file: {}".format(str(e)))
+    
+    def _clear_all_data_from_database(self):
+        """Clear all vulnerabilities from JSON file"""
+        try:
+            data = self._load_data_from_file()
+            
+            # Clear vulnerabilities but keep other data
+            data["vulnerabilities"] = {}
+            
+            self._save_data_to_file(data)
+            
+        except Exception as e:
+            print("Error clearing data from file: {}".format(str(e)))
+    
+    def _change_database_location(self, event):
+        """Allow user to choose a different data file location"""
+        try:
+            file_chooser = JFileChooser()
+            file_chooser.setDialogTitle("Choose Data File Location")
+            file_chooser.setSelectedFile(java.io.File(self._data_file_path))
+            
+            # Add JSON filter
+            json_filter = FileNameExtensionFilter("JSON Data Files (*.json)", ["json"])
+            file_chooser.setFileFilter(json_filter)
+            
+            result = file_chooser.showSaveDialog(self._main_panel)
+            
+            if result == JFileChooser.APPROVE_OPTION:
+                new_file_path = file_chooser.getSelectedFile().getAbsolutePath()
+                
+                # Ensure .json extension
+                if not new_file_path.lower().endswith('.json'):
+                    new_file_path += '.json'
+                
+                # Export current data to new location
+                self._migrate_data_file(new_file_path)
+                
+                JOptionPane.showMessageDialog(
+                    self._main_panel,
+                    "Data file location changed to:\n{}".format(new_file_path),
+                    "Data File Location Changed",
+                    JOptionPane.INFORMATION_MESSAGE
+                )
+                
+        except Exception as e:
+            print("Error changing data file location: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error changing data file location: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _migrate_data_file(self, new_file_path):
+        """Migrate data to new JSON file location"""
+        try:
+            # Prepare data for migration
+            data = {
+                "vulnerabilities": {},
+                "watch_list_audit": [],
+                "settings": {},
+                "vuln_counter": self._vuln_counter
+            }
+            
+            # Copy vulnerabilities
+            with self._vuln_lock:
+                for vuln_id, vuln in self._vulnerabilities.items():
+                    data["vulnerabilities"][str(vuln_id)] = {
+                        'cwe': vuln['cwe'],
+                        'description': vuln['description'],
+                        'url': vuln['url'],
+                        'method': vuln['method'],
+                        'timestamp': vuln['timestamp'],
+                        'request_hash': vuln['request_hash']
+                    }
+            
+            # Copy paths from audit data
+            if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                data["watch_list_audit"] = self._data['watch_list_audit']
+            else:
+                # Initialize empty watch list if no data exists
+                data["watch_list_audit"] = []
+            
+            # Update file path and save
+            self._data_file_path = new_file_path
+            self._save_data_to_file(data)
+            
+            print("Data migrated to new file: {}".format(new_file_path))
+            
+        except Exception as e:
+            print("Error migrating data file: {}".format(str(e)))
+            raise
+    
+    def _manage_projects(self, event):
+        """Show project management dialog"""
+        try:
+            # Create project management dialog
+            dialog_panel = JPanel(BorderLayout())
+            
+            # Top panel with current project info
+            info_panel = JPanel()
+            info_panel.add(JLabel("Current Project: {}".format(self._current_project_name)))
+            dialog_panel.add(info_panel, BorderLayout.NORTH)
+            
+            # Center panel with project list
+            center_panel = JPanel(BorderLayout())
+            center_panel.add(JLabel("Available Projects:"), BorderLayout.NORTH)
+            
+            # Project list
+            project_list_data = []
+            for name, info in self._project_mappings.items():
+                status = " (current)" if name == self._current_project_name else ""
+                project_list_data.append([
+                    name + status,
+                    info.get("description", ""),
+                    info.get("last_used", ""),
+                    info.get("data_file", "")
+                ])
+            
+            column_names = ["Project", "Description", "Last Used", "Data File"]
+            project_table_model = DefaultTableModel(column_names, 0)
+            for row in project_list_data:
+                project_table_model.addRow(row)
+            
+            project_table = JTable(project_table_model)
+            project_table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+            project_scroll = JScrollPane(project_table)
+            project_scroll.setPreferredSize(Dimension(600, 200))
+            center_panel.add(project_scroll, BorderLayout.CENTER)
+            
+            dialog_panel.add(center_panel, BorderLayout.CENTER)
+            
+            # Bottom panel with buttons
+            button_panel = JPanel()
+            
+            # Switch project button
+            switch_btn = JButton("Switch to Selected Project")
+            def switch_action(e):
+                selected_row = project_table.getSelectedRow()
+                if selected_row >= 0:
+                    project_name = str(project_table_model.getValueAt(selected_row, 0))
+                    # Remove "(current)" suffix if present
+                    if " (current)" in project_name:
+                        project_name = project_name.replace(" (current)", "")
+                    
+                    if project_name != self._current_project_name:
+                        if self._switch_project(project_name):
+                            JOptionPane.showMessageDialog(
+                                self._main_panel,
+                                "Switched to project: {}".format(project_name),
+                                "Project Switched",
+                                JOptionPane.INFORMATION_MESSAGE
+                            )
+                        else:
+                            JOptionPane.showMessageDialog(
+                                self._main_panel,
+                                "Failed to switch to project: {}".format(project_name),
+                                "Switch Failed",
+                                JOptionPane.ERROR_MESSAGE
+                            )
+                    else:
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Already using project: {}".format(project_name),
+                            "Already Current",
+                            JOptionPane.INFORMATION_MESSAGE
+                        )
+                else:
+                    JOptionPane.showMessageDialog(
+                        self._main_panel,
+                        "Please select a project first",
+                        "No Selection",
+                        JOptionPane.WARNING_MESSAGE
+                    )
+            
+            switch_btn.addActionListener(switch_action)
+            button_panel.add(switch_btn)
+            
+            # New project button
+            new_btn = JButton("Create New Project")
+            def new_action(e):
+                self._create_new_project_dialog()
+            
+            new_btn.addActionListener(new_action)
+            button_panel.add(new_btn)
+            
+            # Rename current project button
+            rename_btn = JButton("Rename Current Project")
+            def rename_action(e):
+                current_name = self._current_project_name
+                new_name = JOptionPane.showInputDialog(
+                    self._main_panel,
+                    "Enter new name for project '{}':\n\n(This will create a new data file and preserve your data)".format(current_name),
+                    "Rename Project",
+                    JOptionPane.QUESTION_MESSAGE
+                )
+                
+                if new_name and new_name.strip():
+                    new_name = new_name.strip()
+                    if self._rename_current_project(new_name):
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Project renamed from '{}' to '{}'".format(current_name, new_name),
+                            "Project Renamed",
+                            JOptionPane.INFORMATION_MESSAGE
+                        )
+                    else:
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Failed to rename project. Name may already exist.",
+                            "Rename Failed",
+                            JOptionPane.ERROR_MESSAGE
+                        )
+            
+            rename_btn.addActionListener(rename_action)
+            button_panel.add(rename_btn)
+            
+            # Delete project button
+            delete_btn = JButton("Delete Selected Project")
+            def delete_action(e):
+                selected_row = project_table.getSelectedRow()
+                if selected_row >= 0:
+                    project_name = str(project_table_model.getValueAt(selected_row, 0))
+                    if " (current)" in project_name:
+                        project_name = project_name.replace(" (current)", "")
+                    
+                    if project_name == "default":
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Cannot delete the default project",
+                            "Cannot Delete",
+                            JOptionPane.WARNING_MESSAGE
+                        )
+                        return
+                    
+                    if project_name == self._current_project_name:
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Cannot delete the currently active project.\nSwitch to another project first.",
+                            "Cannot Delete",
+                            JOptionPane.WARNING_MESSAGE
+                        )
+                        return
+                    
+                    confirm = JOptionPane.showConfirmDialog(
+                        self._main_panel,
+                        "Delete project '{}'?\nThis will remove the project mapping but not the data file.".format(project_name),
+                        "Confirm Delete",
+                        JOptionPane.YES_NO_OPTION
+                    )
+                    
+                    if confirm == JOptionPane.YES_OPTION:
+                        del self._project_mappings[project_name]
+                        self._save_project_mappings()
+                        JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "Project '{}' deleted".format(project_name),
+                            "Project Deleted",
+                            JOptionPane.INFORMATION_MESSAGE
+                        )
+                else:
+                    JOptionPane.showMessageDialog(
+                        self._main_panel,
+                        "Please select a project first",
+                        "No Selection",
+                        JOptionPane.WARNING_MESSAGE
+                    )
+            
+            delete_btn.addActionListener(delete_action)
+            button_panel.add(delete_btn)
+            
+            dialog_panel.add(button_panel, BorderLayout.SOUTH)
+            
+            # Show dialog
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                dialog_panel,
+                "Project Management",
+                JOptionPane.PLAIN_MESSAGE
+            )
+            
+        except Exception as e:
+            print("Error in project management: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error managing projects: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _create_new_project_dialog(self):
+        """Show dialog to create a new project"""
+        try:
+            # Use the same setup dialog as initial project creation
+            project_info = self._prompt_for_new_project_setup()
+            
+            if not project_info:
+                return
+            
+            project_name = project_info["name"]
+            data_file_path = project_info["data_file"]
+            
+            # Check if project already exists
+            safe_project_name = project_name.replace(" ", "_").replace("-", "_")
+            if safe_project_name in self._project_mappings:
+                JOptionPane.showMessageDialog(
+                    self._main_panel,
+                    "Project '{}' already exists".format(project_name),
+                    "Project Exists",
+                    JOptionPane.WARNING_MESSAGE
+                )
+                return
+            
+            # Create the project
+            self._create_new_project_entry_with_path(safe_project_name, data_file_path)
+            
+            # Ask if user wants to switch to new project
+            switch_choice = JOptionPane.showConfirmDialog(
+                self._main_panel,
+                "Project '{}' created successfully.\n\nWould you like to switch to this project now?".format(project_name),
+                "Project Created",
+                JOptionPane.YES_NO_OPTION
+            )
+            
+            if switch_choice == JOptionPane.YES_OPTION:
+                self._switch_project(safe_project_name)
+            
+        except Exception as e:
+            print("Error creating new project: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error creating project: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def registerExtenderCallbacks(self, callbacks):
+        # Keep a reference to our callbacks object
+        self._callbacks = callbacks
+        
+        # Obtain an extension helpers object
+        self._helpers = callbacks.getHelpers()
+        
+        # Set our extension name
+        callbacks.setExtensionName("Vuln tracker")
+        
+        print("Starting Vuln tracker extension initialization...")
+        
+        # Initialize vulnerability tracking
+        self._vulnerabilities = {}  # Format: {unique_id: {cwe: 'CWE-89', description: 'SQL Injection', url: '', method: '', timestamp: '', request_hash: ''}}
+        self._vuln_lock = threading.Lock()
+        self._vuln_counter = 0  # Counter for unique vulnerability IDs
+        
+        # Flag to prevent saving during project switches and GUI updates
+        self._is_updating_gui = False
+        
+        # CWE definitions
+        self._cwe_types = {
+            "CWE-89": "SQL Injection",
+            "CWE-79": "Reflected Cross-Site Scripting (XSS)",
+            "CWE-79_2": "Stored Cross-Site Scripting (XSS)",
+            "CWE-78": "Command Injection", 
+            "CWE-22": "Path Traversal",
+            "CWE-352": "Cross-Site Request Forgery (CSRF)",
+            "CWE-306": "Missing Authentication",
+            "CWE-862": "Missing Authorization",
+            "CWE-200": "Information Disclosure",
+            "CWE-94": "Code Injection",
+            "CWE-502": "Deserialization",
+            "CWE-611": "XXE Injection",
+            "CWE-601": "Open Redirect",
+            "CWE-434": "File Upload",
+            "CWE-307": "Brute Force",
+            "CWE-1104": "Use of Unmaintained Third Party Components",
+            "CWE-841": "Business Logic Errors",
+            "CWE-918": "Server-Side Request Forgery (SSRF)",
+            "CWE-639": "Insecure Direct Object Reference (IDOR)",
+            "CWE-204": "User Enumeration",
+            "CWE-209": "Error Message Containing Sensitive Information"
+        }
+        
+        # Auto-audit settings - default to enabled
+        self._auto_audit_repeater_enabled = True
+        self._auto_audit_scanner_enabled = True
+        
+        # Sitemap monitoring settings
+        self._sitemap_config = None
+        self._sitemap_last_check = None
+        self._sitemap_monitor_thread = None
+        
+        # Initialize JSON file for persistent storage
+        self._init_database()
+        
+        # Load existing data from JSON file
+        self._load_data_from_database()
+        
+        # Create the GUI
+        self._create_gui()
+        
+        # Update GUI with loaded data
+        self._update_gui_with_loaded_data()
+        
+        # Register ourselves as an HTTP listener
+        callbacks.registerHttpListener(self)
+        
+        # Register ourselves as a context menu factory
+        callbacks.registerContextMenuFactory(self)
+        
+        # Register ourselves as a message editor tab factory
+        callbacks.registerMessageEditorTabFactory(self)
+        
+        # Add the custom tab to Burp's UI
+        callbacks.addSuiteTab(self)
+        
+        # Start sitemap monitoring if configured
+        if self._sitemap_config and self._sitemap_config.get("auto_update", False):
+            self._start_sitemap_monitoring()
+        
+        print("Vuln tracker extension loaded successfully!")
+    
+    def _create_gui(self):
+        """Create the extension's GUI with tabbed interface"""
+        # Main panel with tabbed pane
+        self._main_panel = JPanel(BorderLayout())
+        self._tabbed_pane = JTabbedPane()
+        
+        # Create tabs
+        self._create_watch_list_tab()
+        self._create_vulnerabilities_tab()
+        
+        self._main_panel.add(self._tabbed_pane, BorderLayout.CENTER)
+    
+    def _create_watch_list_tab(self):
+        """Create the watch list management tab"""
+        watch_panel = JPanel(BorderLayout())
+        
+        # Top panel for title and controls
+        top_panel = JPanel(BorderLayout())
+        
+        # Title and instructions panel
+        title_panel = JPanel()
+        title_panel.setLayout(BoxLayout(title_panel, BoxLayout.Y_AXIS))
+        
+        title_label = JLabel("Vuln tracker - Manage Watch List")
+        title_label.setFont(title_label.getFont().deriveFont(16.0))
+        title_panel.add(title_label)
+        
+        instructions = JLabel("Manage paths/URLs to monitor. Import from file or add manually.")
+        title_panel.add(Box.createVerticalStrut(5))
+        title_panel.add(instructions)
+        
+        top_panel.add(title_panel, BorderLayout.WEST)
+        
+        # Button panel for top
+        top_button_panel = JPanel()
+        
+        # Import from file button
+        self._import_button = JButton("Import from File", actionPerformed=self._import_watch_list)
+        top_button_panel.add(self._import_button)
+        
+        # Import from sitemap button
+        self._import_sitemap_button = JButton("Import from Sitemap", actionPerformed=self._import_from_sitemap)
+        top_button_panel.add(self._import_sitemap_button)
+        
+        # Export button
+        self._export_watch_button = JButton("Export to File", actionPerformed=self._export_watch_list)
+        top_button_panel.add(self._export_watch_button)
+        
+        # Configuration button
+        self._config_button = JButton("Configuration", actionPerformed=self._show_configuration_dialog)
+        top_button_panel.add(self._config_button)
+        
+        top_panel.add(top_button_panel, BorderLayout.EAST)
+        
+        watch_panel.add(top_panel, BorderLayout.NORTH)
+        
+        # Center panel with tabbed interface for different views
+        center_tabbed_pane = JTabbedPane()
+        
+        # Table view tab
+        self._create_table_view_tab(center_tabbed_pane)
+        
+        # Text editor tab  
+        self._create_text_editor_tab(center_tabbed_pane)
+        
+        watch_panel.add(center_tabbed_pane, BorderLayout.CENTER)
+        
+        # Bottom panel for status
+        bottom_panel = JPanel()
+        bottom_panel.setLayout(BoxLayout(bottom_panel, BoxLayout.Y_AXIS))
+        
+        # Status label
+        self._status_label = JLabel("Ready - 0 paths in watch list")
+        bottom_panel.add(self._status_label)
+        
+        # Progress panel for audit completion
+        progress_panel = JPanel()
+        progress_panel.setLayout(BoxLayout(progress_panel, BoxLayout.X_AXIS))
+        
+        # Progress label
+        self._progress_label = JLabel("Audit Progress:")
+        progress_panel.add(self._progress_label)
+        progress_panel.add(Box.createHorizontalStrut(10))
+        
+        # Progress bar
+        self._progress_bar = JProgressBar(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setStringPainted(True)
+        self._progress_bar.setString("0%")
+        self._progress_bar.setPreferredSize(Dimension(200, 20))
+        progress_panel.add(self._progress_bar)
+        
+        # Progress details label
+        progress_panel.add(Box.createHorizontalStrut(10))
+        self._progress_details = JLabel("(0/0 audited)")
+        self._progress_details.setFont(self._progress_details.getFont().deriveFont(10.0))
+        progress_panel.add(self._progress_details)
+        
+        bottom_panel.add(progress_panel)
+        
+        # Project info label
+        self._project_info_label = JLabel("Project: Not set")
+        self._project_info_label.setFont(self._project_info_label.getFont().deriveFont(10.0))
+        bottom_panel.add(self._project_info_label)
+        
+        watch_panel.add(bottom_panel, BorderLayout.SOUTH)
+        
+        self._tabbed_pane.addTab("Watch List", watch_panel)
+    
+    def _create_table_view_tab(self, parent_pane):
+        """Create the table view tab for watch list management"""
+        table_panel = JPanel(BorderLayout())
+        
+        # Instructions
+        instruction_label = JLabel("Monitor paths for manual testing (Repeater) and automated scanning:")
+        table_panel.add(instruction_label, BorderLayout.NORTH)
+        
+        # Create table for watch list with audit status
+        column_names = ["Path/URL", "Manual Audited", "Scanned", "Last Audit", "Highlight"]
+        
+        # Create custom table model
+        class AuditTableModel(DefaultTableModel):
+            def __init__(self, column_names, rows):
+                DefaultTableModel.__init__(self, column_names, rows)
+            
+            def isCellEditable(self, row, column):
+                if column == 4:  # "Highlight" column is user-editable
+                    return True
+                return False  # Other columns are auto-managed by tool detection
+            
+            def getColumnClass(self, column):
+                if column in [1, 2, 4]:  # "Manual Audited", "Scanned", "Highlight" columns
+                    return java.lang.Boolean
+                return java.lang.String
+        
+        self._watch_table_model = AuditTableModel(column_names, 0)
+        
+        self._watch_table = JTable(self._watch_table_model)
+        self._watch_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
+        
+        # Add custom row highlighting for cursor hover
+        self._watch_table.addMouseMotionListener(self._create_table_hover_listener())
+        
+        # Add right-click context menu
+        self._watch_table.addMouseListener(self._create_table_context_menu_listener())
+        
+        # Custom renderer for row highlighting
+        self._setup_table_row_highlighting()
+        
+        # Set column widths
+        column_model = self._watch_table.getColumnModel()
+        column_model.getColumn(0).setPreferredWidth(280)  # Path/URL
+        column_model.getColumn(1).setPreferredWidth(100)  # Manual Audited
+        column_model.getColumn(2).setPreferredWidth(80)   # Scanned
+        column_model.getColumn(3).setPreferredWidth(130)  # Last Audit
+        column_model.getColumn(4).setPreferredWidth(80)   # Highlight
+        
+        # Add table change listener to save audit status
+        self._watch_table_model.addTableModelListener(lambda e: self._on_audit_status_changed(e))
+        
+        # Scroll pane for table
+        table_scroll = JScrollPane(self._watch_table)
+        table_panel.add(table_scroll, BorderLayout.CENTER)
+        
+        # Button panel for table operations
+        table_button_panel = JPanel()
+        
+        # Add single path button
+        add_path_btn = JButton("Add Path", actionPerformed=self._add_single_path)
+        table_button_panel.add(add_path_btn)
+        
+        # Remove selected path button
+        remove_path_btn = JButton("Remove Selected", actionPerformed=self._remove_selected_path)
+        table_button_panel.add(remove_path_btn)
+        
+        # Clear all button
+        clear_all_btn = JButton("Clear All", actionPerformed=self._clear_all_from_table)
+        table_button_panel.add(clear_all_btn)
+        
+        table_panel.add(table_button_panel, BorderLayout.SOUTH)
+        
+        parent_pane.addTab("Table View", table_panel)
+    
+    def _create_table_hover_listener(self):
+        """Create mouse motion listener for table row highlighting on hover"""
+        class TableHoverListener(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+                self.last_hover_row = -1
+            
+            def mouseMoved(self, event):
+                table = event.getSource()
+                point = event.getPoint()
+                hover_row = table.rowAtPoint(point)
+                
+                if hover_row != self.last_hover_row:
+                    if self.last_hover_row >= 0:
+                        table.repaint(table.getCellRect(self.last_hover_row, 0, True))
+                    if hover_row >= 0:
+                        table.repaint(table.getCellRect(hover_row, 0, True))
+                    self.last_hover_row = hover_row
+        
+        return TableHoverListener(self)
+    
+    def _create_table_context_menu_listener(self):
+        """Create mouse listener for right-click context menu"""
+        class TableContextMenuListener(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def mousePressed(self, event):
+                if event.isPopupTrigger():
+                    self._show_context_menu(event)
+            
+            def mouseReleased(self, event):
+                if event.isPopupTrigger():
+                    self._show_context_menu(event)
+            
+            def _show_context_menu(self, event):
+                table = event.getSource()
+                point = event.getPoint()
+                row = table.rowAtPoint(point)
+                
+                if row >= 0:
+                    # If the clicked row is not selected, select only that row
+                    if row not in table.getSelectedRows():
+                        table.setRowSelectionInterval(row, row)
+                    
+                    # Create context menu
+                    from javax.swing import JPopupMenu, JMenuItem
+                    popup = JPopupMenu()
+                    
+                    selected_rows = table.getSelectedRows()
+                    
+                    # Delete option
+                    if len(selected_rows) == 1:
+                        delete_item = JMenuItem("Delete Selected Request")
+                    else:
+                        delete_item = JMenuItem("Delete {} Selected Requests".format(len(selected_rows)))
+                    
+                    delete_item.addActionListener(lambda e: self.extension_parent._delete_selected_requests())
+                    popup.add(delete_item)
+                    
+                    # Mark as vulnerable option
+                    if len(selected_rows) == 1:
+                        vuln_item = JMenuItem("Mark as Vulnerable...")
+                    else:
+                        vuln_item = JMenuItem("Mark {} Requests as Vulnerable...".format(len(selected_rows)))
+                    
+                    vuln_item.addActionListener(lambda e: self.extension_parent._mark_selected_as_vulnerable(selected_rows))
+                    popup.add(vuln_item)
+                    
+                    # Add "Send to Repeater" option (only for single selection)
+                    if len(selected_rows) == 1:
+                        send_item = JMenuItem("Send to Repeater")
+                        send_item.addActionListener(lambda e: self.extension_parent._send_to_repeater(selected_rows[0]))
+                        popup.add(send_item)
+                    
+                    popup.show(table, event.getX(), event.getY())
+        
+        return TableContextMenuListener(self)
+    
+    def _setup_table_row_highlighting(self):
+        """Setup custom table renderer for row highlighting"""
+        from java.awt import Color
+        from javax.swing.table import DefaultTableCellRenderer
+        from javax.swing import JCheckBox
+        
+        class HoverRowRenderer(DefaultTableCellRenderer):
+            def __init__(self, extension_parent):
+                DefaultTableCellRenderer.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                component = DefaultTableCellRenderer.getTableCellRendererComponent(
+                    self, table, value, isSelected, hasFocus, row, column)
+                
+                # Default colors
+                if isSelected:
+                    component.setBackground(table.getSelectionBackground())
+                    component.setForeground(table.getSelectionForeground())
+                else:
+                    # Check if this is the hover row
+                    mouse_listener = None
+                    for listener in table.getMouseMotionListeners():
+                        if hasattr(listener, 'last_hover_row'):
+                            mouse_listener = listener
+                            break
+                    
+                    if mouse_listener and row == mouse_listener.last_hover_row:
+                        # Light blue highlight for hover
+                        component.setBackground(Color(230, 240, 255))
+                        component.setForeground(Color.BLACK)
+                    else:
+                        component.setBackground(table.getBackground())
+                        component.setForeground(table.getForeground())
+                
+                return component
+        
+        from javax.swing.table import TableCellRenderer
+        
+        class HoverCheckBoxRenderer(JCheckBox, TableCellRenderer):
+            def __init__(self, extension_parent):
+                JCheckBox.__init__(self)
+                self.extension_parent = extension_parent
+                self.setHorizontalAlignment(JCheckBox.CENTER)
+                self.setOpaque(True)  # Important for background color to show
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                # Set checkbox state
+                if value is not None and isinstance(value, (bool, java.lang.Boolean)):
+                    self.setSelected(bool(value))
+                else:
+                    self.setSelected(False)
+                
+                # Handle colors and selection
+                if isSelected:
+                    self.setBackground(table.getSelectionBackground())
+                    self.setForeground(table.getSelectionForeground())
+                else:
+                    # Check if this is the hover row
+                    mouse_listener = None
+                    for listener in table.getMouseMotionListeners():
+                        if hasattr(listener, 'last_hover_row'):
+                            mouse_listener = listener
+                            break
+                    
+                    if mouse_listener and row == mouse_listener.last_hover_row:
+                        # Light blue highlight for hover
+                        self.setBackground(Color(230, 240, 255))
+                        self.setForeground(Color.BLACK)
+                    else:
+                        self.setBackground(table.getBackground())
+                        self.setForeground(table.getForeground())
+                
+                return self
+        
+        # Apply the appropriate renderer to each column
+        text_renderer = HoverRowRenderer(self)
+        checkbox_renderer = HoverCheckBoxRenderer(self)
+        
+        # Apply renderers based on column type
+        for i in range(self._watch_table.getColumnCount()):
+            column = self._watch_table.getColumnModel().getColumn(i)
+            if i in [1, 2, 4]:  # "Manual Audited", "Scanned", "Highlight" columns
+                column.setCellRenderer(checkbox_renderer)
+            else:  # Text columns (Path/URL and Last Audit)
+                column.setCellRenderer(text_renderer)
+    
+    def _delete_selected_requests(self):
+        """Delete selected requests from the watch table"""
+        try:
+            selected_rows = self._watch_table.getSelectedRows()
+            if not selected_rows:
+                return
+            
+            # Confirm deletion
+            from javax.swing import JOptionPane
+            message = "Delete {} selected request(s)?".format(len(selected_rows))
+            result = JOptionPane.showConfirmDialog(
+                None,
+                message,
+                "Confirm Deletion",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # First, collect all the path URLs to be deleted
+                paths_to_delete = []
+                for row in selected_rows:
+                    path_url = self._watch_table_model.getValueAt(row, 0)
+                    paths_to_delete.append(path_url)
+                
+                # Remove rows in reverse order to maintain indices
+                for row in sorted(selected_rows, reverse=True):
+                    self._watch_table_model.removeRow(row)
+                
+                # Remove from internal watch list audit data
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    # Create a new list without the deleted paths
+                    current_watch_list = self._data['watch_list_audit']
+                    updated_watch_list = [item for item in current_watch_list if item.get('path') not in paths_to_delete]
+                    self._data['watch_list_audit'] = updated_watch_list
+                
+                # Save the updated watch list
+                self._save_watch_list_data()
+                
+                # Update status label
+                remaining_count = len(self._data.get('watch_list_audit', [])) if hasattr(self, '_data') else 0
+                if hasattr(self, '_status_label'):
+                    self._status_label.setText("Ready - {} path(s) in watch list".format(remaining_count))
+                
+                self._show_status_feedback("Deleted {} request(s)".format(len(selected_rows)))
+                
+        except Exception as e:
+            print("Error deleting selected requests: {}".format(str(e)))
+            self._show_status_feedback("Error deleting requests: {}".format(str(e)))
+    
+    def _mark_selected_as_vulnerable(self, selected_rows):
+        """Mark selected requests as vulnerable with chosen CWE type"""
+        try:
+            if not selected_rows:
+                return
+            
+            # Get paths from selected rows
+            selected_paths = []
+            for row in selected_rows:
+                path_url = self._watch_table_model.getValueAt(row, 0)
+                selected_paths.append(path_url)
+            
+            # Show CWE selection dialog
+            from javax.swing import JDialog, JPanel, JLabel, JComboBox, JButton, JOptionPane
+            from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
+            
+            # Create dialog
+            dialog = JDialog(None, "Mark as Vulnerable", True)
+            dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE)
+            dialog.setSize(500, 300)
+            dialog.setLocationRelativeTo(None)
+            
+            main_panel = JPanel(BorderLayout())
+            
+            # Content panel
+            content_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            gbc.insets = Insets(10, 10, 10, 10)
+            gbc.anchor = GridBagConstraints.WEST
+            
+            # Title
+            gbc.gridx = 0
+            gbc.gridy = 0
+            gbc.gridwidth = 2
+            if len(selected_rows) == 1:
+                title_text = "Mark request as vulnerable:"
+            else:
+                title_text = "Mark {} requests as vulnerable:".format(len(selected_rows))
+            title_label = JLabel(title_text)
+            title_label.setFont(title_label.getFont().deriveFont(14.0))
+            content_panel.add(title_label, gbc)
+            
+            # Show selected paths (limited to first few for display)
+            gbc.gridy = 1
+            gbc.gridwidth = 2
+            if len(selected_paths) <= 5:
+                paths_text = "\n".join(selected_paths)
+            else:
+                paths_text = "\n".join(selected_paths[:3]) + "\n... and {} more".format(len(selected_paths) - 3)
+            
+            paths_label = JLabel("<html><pre>{}</pre></html>".format(paths_text))
+            paths_label.setFont(paths_label.getFont().deriveFont(10.0))
+            content_panel.add(paths_label, gbc)
+            
+            # CWE selection
+            gbc.gridy = 2
+            gbc.gridwidth = 1
+            gbc.weightx = 0.0
+            content_panel.add(JLabel("CWE Type:"), gbc)
+            
+            gbc.gridx = 1
+            gbc.weightx = 1.0
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            cwe_items = ["{} - {}".format(k, v) for k, v in self._cwe_types.items()]
+            cwe_combo = JComboBox(cwe_items)
+            content_panel.add(cwe_combo, gbc)
+            
+            main_panel.add(content_panel, BorderLayout.CENTER)
+            
+            # Button panel
+            button_panel = JPanel()
+            
+            # Track the result
+            result = {"cwe_selected": None}
+            
+            # Mark button
+            def mark_action(e):
+                selected_item = str(cwe_combo.getSelectedItem())
+                if selected_item:
+                    result["cwe_selected"] = selected_item
+                    dialog.dispose()
+            
+            mark_button = JButton("Mark as Vulnerable")
+            mark_button.addActionListener(mark_action)
+            button_panel.add(mark_button)
+            
+            # Cancel button
+            cancel_button = JButton("Cancel")
+            cancel_button.addActionListener(lambda e: dialog.dispose())
+            button_panel.add(cancel_button)
+            
+            main_panel.add(button_panel, BorderLayout.SOUTH)
+            
+            dialog.add(main_panel)
+            dialog.setVisible(True)
+            
+            # Process the result if user selected a CWE
+            if result["cwe_selected"]:
+                self._process_bulk_vulnerability_marking(selected_paths, result["cwe_selected"])
+            
+        except Exception as e:
+            print("Error marking selected as vulnerable: {}".format(str(e)))
+            self._show_status_feedback("Error marking vulnerabilities: {}".format(str(e)))
+    
+    def _process_bulk_vulnerability_marking(self, selected_paths, cwe_selection):
+        """Process marking multiple paths as vulnerable"""
+        try:
+            # Parse CWE code and description
+            cwe_code = cwe_selection.split(" - ")[0]
+            description = cwe_selection.split(" - ")[1]
+            
+            marked_count = 0
+            duplicate_count = 0
+            
+            for path in selected_paths:
+                try:
+                    # Create a fake URL and method for consistency with existing vulnerability tracking
+                    # Since we only have paths from the watch list, we'll use default values
+                    method = "GET"  # Default method
+                    
+                    # Try to construct a reasonable URL from the path
+                    if path.startswith("http"):
+                        full_url = path
+                    else:
+                        # Assume HTTPS and add a default host
+                        full_url = "https://target.com{}".format(path if path.startswith("/") else "/" + path)
+                    
+                    # Create hash for grouping (this is simplified since we don't have actual request objects)
+                    request_hash = hash("{}:{}".format(method, path))
+                    
+                    # Check for duplicate CWE on same path
+                    is_duplicate = False
+                    with self._vuln_lock:
+                        for vuln_id, vuln in self._vulnerabilities.items():
+                            if (vuln['url'] == full_url and 
+                                vuln['cwe'] == cwe_code):
+                                is_duplicate = True
+                                duplicate_count += 1
+                                break
+                        
+                        if not is_duplicate:
+                            # Create unique vulnerability ID
+                            self._vuln_counter += 1
+                            vuln_id = self._vuln_counter
+                            
+                            # Store vulnerability
+                            self._vulnerabilities[vuln_id] = {
+                                'cwe': cwe_code,
+                                'description': description,
+                                'url': full_url,
+                                'method': method,
+                                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'request_hash': request_hash,
+                                'message': None  # No actual request message available
+                            }
+                            
+                            # Save to database
+                            self._save_vulnerability_to_database(vuln_id, self._vulnerabilities[vuln_id])
+                            marked_count += 1
+                
+                except Exception as path_error:
+                    print("Error processing path '{}': {}".format(path, str(path_error)))
+            
+            # Update vulnerability table
+            self._refresh_vulnerability_table()
+            
+            # Switch to vulnerabilities tab to show results
+            self._tabbed_pane.setSelectedIndex(1)
+            
+            # Show success message
+            message_parts = []
+            if marked_count > 0:
+                message_parts.append("Marked {} path(s) as vulnerable to {}".format(marked_count, cwe_code))
+            if duplicate_count > 0:
+                message_parts.append("{} path(s) already marked with this CWE".format(duplicate_count))
+            
+            final_message = "\n".join(message_parts)
+            
+            from javax.swing import JOptionPane
+            JOptionPane.showMessageDialog(
+                None,
+                final_message,
+                "Bulk Vulnerability Marking Complete",
+                JOptionPane.INFORMATION_MESSAGE
+            )
+            
+            self._show_status_feedback("Marked {} vulnerabilities".format(marked_count))
+            print("Bulk vulnerability marking: {} new, {} duplicates for {}".format(
+                marked_count, duplicate_count, cwe_code))
+            
+        except Exception as e:
+            print("Error processing bulk vulnerability marking: {}".format(str(e)))
+            self._show_status_feedback("Error processing vulnerabilities: {}".format(str(e)))
+    
+    def _send_to_repeater(self, row_index):
+        """Send the selected request to Burp Repeater"""
+        try:
+            path_url = self._watch_table_model.getValueAt(row_index, 0)
+            
+            # For now, just show feedback. In a real implementation, you would:
+            # 1. Find the corresponding HTTP request from the sitemap
+            # 2. Use self._callbacks.sendToRepeater() to send it to Repeater
+            
+            self._show_status_feedback("Send to Repeater feature - Path: {}".format(path_url))
+            print("Send to Repeater requested for: {}".format(path_url))
+            
+        except Exception as e:
+            print("Error sending to repeater: {}".format(str(e)))
+            self._show_status_feedback("Error sending to repeater: {}".format(str(e)))
+
+    def _create_text_editor_tab(self, parent_pane):
+        """Create the text editor tab for bulk editing"""
+        text_panel = JPanel(BorderLayout())
+        
+        # Instructions
+        instruction_label = JLabel("Add paths/URLs to monitor (one per line). Supports wildcards (*)")
+        text_panel.add(instruction_label, BorderLayout.NORTH)
+        
+        # Text area for path list (keep the original functionality)
+        self._path_textarea = JTextArea(15, 50)
+        self._path_textarea.setFont(self._path_textarea.getFont().deriveFont(12.0))
+        scroll_pane = JScrollPane(self._path_textarea)
+        text_panel.add(scroll_pane, BorderLayout.CENTER)
+        
+        # Button panel for text operations
+        text_button_panel = JPanel()
+        
+        # Update button
+        self._add_button = JButton("Update Watch List", actionPerformed=self._update_paths)
+        text_button_panel.add(self._add_button)
+        
+        # Clear button
+        self._clear_button = JButton("Clear All", actionPerformed=self._clear_paths)
+        text_button_panel.add(self._clear_button)
+        
+        # Load sample button
+        self._sample_button = JButton("Load Sample Paths", actionPerformed=self._load_sample)
+        text_button_panel.add(self._sample_button)
+        
+        text_panel.add(text_button_panel, BorderLayout.SOUTH)
+        
+        parent_pane.addTab("Text Editor", text_panel)
+    
+    def _create_vulnerabilities_tab(self):
+        """Create the vulnerabilities tracking tab"""
+        vuln_panel = JPanel(BorderLayout())
+        
+        # Top panel for CWE filter
+        top_panel = JPanel()
+        top_panel.add(JLabel("Filter by CWE Type:"))
+        
+        # CWE filter dropdown
+        cwe_items = ["All Vulnerabilities"] + ["{} - {}".format(k, v) for k, v in self._cwe_types.items()]
+        self._cwe_filter = JComboBox(cwe_items)
+        self._cwe_filter.addActionListener(lambda e: self._filter_vulnerabilities())
+        top_panel.add(self._cwe_filter)
+        
+        # Clear vulnerabilities button
+        clear_vuln_btn = JButton("Clear All Vulnerabilities", actionPerformed=self._clear_vulnerabilities)
+        top_panel.add(clear_vuln_btn)
+        
+        # Data file location button
+        db_btn = JButton("Change Data File Location", actionPerformed=self._change_database_location)
+        top_panel.add(db_btn)
+        
+        # Project directory button
+        project_btn = JButton("Manage Projects", actionPerformed=self._manage_projects)
+        top_panel.add(project_btn)
+        
+        # Export options
+        top_panel.add(JLabel("Export as:"))
+        
+        # Export format dropdown
+        export_formats = ["Text (URLs only)", "CSV (Save to file)", "JSON (Copy from dialog)"]
+        self._export_format = JComboBox(export_formats)
+        self._export_format.setSelectedIndex(0)  # Default to Text
+        top_panel.add(self._export_format)
+        
+        # Export button
+        export_btn = JButton("Export", actionPerformed=self._export_vulnerabilities)
+        top_panel.add(export_btn)
+        
+        vuln_panel.add(top_panel, BorderLayout.NORTH)
+        
+        # Vulnerabilities table
+        column_names = ["CWE", "Description", "Method", "URL", "Timestamp", "Remove"]
+        
+        # Create custom table model for remove button
+        class VulnTableModel(DefaultTableModel):
+            def __init__(self, column_names, rows):
+                DefaultTableModel.__init__(self, column_names, rows)
+            
+            def isCellEditable(self, row, column):
+                return False  # All cells are read-only
+            
+            def getColumnClass(self, column):
+                if column == 5:  # "Remove" column
+                    return java.lang.String  # Will be rendered as button
+                return java.lang.String
+        
+        self._vuln_table_model = VulnTableModel(column_names, 0)
+        self._vuln_table = JTable(self._vuln_table_model)
+        self._vuln_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
+        self._vuln_table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS)
+        
+        # Add hover highlighting for vulnerability table
+        self._vuln_table.addMouseMotionListener(self._create_vuln_table_hover_listener())
+        
+        # Add right-click context menu for bulk operations
+        self._vuln_table.addMouseListener(self._create_vuln_table_context_menu_listener())
+        
+        # Custom renderer and editor for remove button column
+        self._setup_vuln_table_renderers()
+        
+        # Set column widths
+        column_model = self._vuln_table.getColumnModel()
+        column_model.getColumn(0).setPreferredWidth(80)   # CWE
+        column_model.getColumn(1).setPreferredWidth(150)  # Description
+        column_model.getColumn(2).setPreferredWidth(60)   # Method
+        column_model.getColumn(3).setPreferredWidth(300)  # URL
+        column_model.getColumn(4).setPreferredWidth(120)  # Timestamp
+        column_model.getColumn(5).setPreferredWidth(70)   # Remove button
+        
+        vuln_scroll = JScrollPane(self._vuln_table)
+        vuln_panel.add(vuln_scroll, BorderLayout.CENTER)
+        
+        # Bottom panel for stats
+        stats_panel = JPanel()
+        self._vuln_stats_label = JLabel("Total Vulnerabilities: 0")
+        stats_panel.add(self._vuln_stats_label)
+        vuln_panel.add(stats_panel, BorderLayout.SOUTH)
+        
+        self._tabbed_pane.addTab("Vulnerabilities", vuln_panel)
+    
+    def _create_vuln_table_hover_listener(self):
+        """Create mouse motion listener for vulnerability table row highlighting on hover"""
+        class VulnTableHoverListener(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+                self.last_hover_row = -1
+            
+            def mouseMoved(self, event):
+                table = event.getSource()
+                point = event.getPoint()
+                hover_row = table.rowAtPoint(point)
+                
+                if hover_row != self.last_hover_row:
+                    if self.last_hover_row >= 0:
+                        table.repaint()
+                    if hover_row >= 0:
+                        table.repaint()
+                    self.last_hover_row = hover_row
+        
+        return VulnTableHoverListener(self)
+    
+    def _create_vuln_table_context_menu_listener(self):
+        """Create mouse listener for vulnerability table right-click context menu"""
+        class VulnTableContextMenuListener(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def mousePressed(self, event):
+                if event.isPopupTrigger():
+                    self._show_context_menu(event)
+            
+            def mouseReleased(self, event):
+                if event.isPopupTrigger():
+                    self._show_context_menu(event)
+            
+            def mouseClicked(self, event):
+                # Handle remove button clicks
+                if event.getClickCount() == 1:
+                    table = event.getSource()
+                    row = table.rowAtPoint(event.getPoint())
+                    col = table.columnAtPoint(event.getPoint())
+                    
+                    # Check if "Remove" column was clicked
+                    if col == 5 and row >= 0:  # Remove column
+                        self.extension_parent._remove_vulnerability_at_row(row)
+            
+            def _show_context_menu(self, event):
+                table = event.getSource()
+                point = event.getPoint()
+                row = table.rowAtPoint(point)
+                
+                if row >= 0:
+                    # If the clicked row is not selected, select only that row
+                    if row not in table.getSelectedRows():
+                        table.setRowSelectionInterval(row, row)
+                    
+                    # Create context menu
+                    from javax.swing import JPopupMenu, JMenuItem
+                    popup = JPopupMenu()
+                    
+                    selected_rows = table.getSelectedRows()
+                    if len(selected_rows) == 1:
+                        delete_text = "Delete Vulnerability"
+                    else:
+                        delete_text = "Delete {} Vulnerabilities".format(len(selected_rows))
+                    
+                    delete_item = JMenuItem(delete_text)
+                    delete_item.addActionListener(lambda e: self.extension_parent._delete_selected_vulnerabilities())
+                    popup.add(delete_item)
+                    
+                    popup.show(table, event.getX(), event.getY())
+        
+        return VulnTableContextMenuListener(self)
+    
+    def _setup_vuln_table_renderers(self):
+        """Setup custom table renderer for vulnerability table row highlighting and remove button"""
+        from java.awt import Color
+        from javax.swing.table import DefaultTableCellRenderer, TableCellRenderer
+        from javax.swing import JButton
+        
+        class VulnHoverRowRenderer(DefaultTableCellRenderer):
+            def __init__(self, extension_parent):
+                DefaultTableCellRenderer.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                component = DefaultTableCellRenderer.getTableCellRendererComponent(
+                    self, table, value, isSelected, hasFocus, row, column)
+                
+                # Default colors
+                if isSelected:
+                    component.setBackground(table.getSelectionBackground())
+                    component.setForeground(table.getSelectionForeground())
+                else:
+                    # Check if this is the hover row
+                    mouse_listener = None
+                    for listener in table.getMouseMotionListeners():
+                        if hasattr(listener, 'last_hover_row'):
+                            mouse_listener = listener
+                            break
+                    
+                    if mouse_listener and row == mouse_listener.last_hover_row:
+                        # Light blue highlight for hover
+                        component.setBackground(Color(230, 240, 255))
+                        component.setForeground(Color.BLACK)
+                    else:
+                        component.setBackground(table.getBackground())
+                        component.setForeground(table.getForeground())
+                
+                return component
+        
+        class RemoveButtonRenderer(JButton, TableCellRenderer):
+            def __init__(self, extension_parent):
+                JButton.__init__(self, "Remove")
+                self.extension_parent = extension_parent
+                self.setOpaque(True)
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                # Handle colors and selection
+                if isSelected:
+                    self.setBackground(table.getSelectionBackground())
+                    self.setForeground(table.getSelectionForeground())
+                else:
+                    # Check if this is the hover row
+                    mouse_listener = None
+                    for listener in table.getMouseMotionListeners():
+                        if hasattr(listener, 'last_hover_row'):
+                            mouse_listener = listener
+                            break
+                    
+                    if mouse_listener and row == mouse_listener.last_hover_row:
+                        # Light blue highlight for hover
+                        self.setBackground(Color(230, 240, 255))
+                        self.setForeground(Color.BLACK)
+                    else:
+                        self.setBackground(table.getBackground())
+                        self.setForeground(table.getForeground())
+                
+                return self
+        
+        # Apply renderers to appropriate columns
+        text_renderer = VulnHoverRowRenderer(self)
+        button_renderer = RemoveButtonRenderer(self)
+        
+        for i in range(self._vuln_table.getColumnCount()):
+            column = self._vuln_table.getColumnModel().getColumn(i)
+            if i == 5:  # Remove button column
+                column.setCellRenderer(button_renderer)
+            else:  # Text columns
+                column.setCellRenderer(text_renderer)
+    
+    def _delete_selected_vulnerabilities(self):
+        """Delete selected vulnerabilities from the table"""
+        try:
+            selected_rows = self._vuln_table.getSelectedRows()
+            if not selected_rows:
+                return
+            
+            # Confirm deletion
+            from javax.swing import JOptionPane
+            message = "Delete {} selected vulnerability(ies)?".format(len(selected_rows))
+            result = JOptionPane.showConfirmDialog(
+                None,
+                message,
+                "Confirm Deletion",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # First, collect all the vulnerability IDs to be deleted
+                vuln_ids_to_delete = []
+                for row in selected_rows:
+                    # We need to find the vulnerability ID based on the row data
+                    cwe = self._vuln_table_model.getValueAt(row, 0)
+                    description = self._vuln_table_model.getValueAt(row, 1)
+                    method = self._vuln_table_model.getValueAt(row, 2)
+                    url = self._vuln_table_model.getValueAt(row, 3)
+                    timestamp = self._vuln_table_model.getValueAt(row, 4)
+                    
+                    # Find matching vulnerability ID
+                    with self._vuln_lock:
+                        for vuln_id, vuln_data in self._vulnerabilities.items():
+                            if (vuln_data.get('cwe') == cwe and 
+                                vuln_data.get('description') == description and
+                                vuln_data.get('method') == method and
+                                vuln_data.get('url') == url and
+                                vuln_data.get('timestamp') == timestamp):
+                                vuln_ids_to_delete.append(vuln_id)
+                                break
+                
+                # Remove rows in reverse order to maintain indices
+                for row in sorted(selected_rows, reverse=True):
+                    self._vuln_table_model.removeRow(row)
+                
+                # Remove from internal vulnerability list and database
+                with self._vuln_lock:
+                    for vuln_id in vuln_ids_to_delete:
+                        if vuln_id in self._vulnerabilities:
+                            del self._vulnerabilities[vuln_id]
+                        self._remove_vulnerability_from_database(vuln_id)
+                
+                # Update vulnerability stats
+                self._update_vulnerability_stats()
+                
+                self._show_status_feedback("Deleted {} vulnerability(ies)".format(len(selected_rows)))
+                
+        except Exception as e:
+            print("Error deleting selected vulnerabilities: {}".format(str(e)))
+            self._show_status_feedback("Error deleting vulnerabilities: {}".format(str(e)))
+    
+    def _remove_vulnerability_at_row(self, row):
+        """Remove vulnerability at specific row with confirmation"""
+        try:
+            # Get vulnerability details for confirmation
+            cwe = self._vuln_table_model.getValueAt(row, 0)
+            description = self._vuln_table_model.getValueAt(row, 1)
+            url = self._vuln_table_model.getValueAt(row, 3)
+            
+            # Confirm removal
+            from javax.swing import JOptionPane
+            message = "Remove vulnerability?\n\nCWE: {}\nDescription: {}\nURL: {}".format(cwe, description, url)
+            result = JOptionPane.showConfirmDialog(
+                None,
+                message,
+                "Confirm Removal",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # Find and remove the vulnerability
+                method = self._vuln_table_model.getValueAt(row, 2)
+                timestamp = self._vuln_table_model.getValueAt(row, 4)
+                
+                # Find matching vulnerability ID
+                vuln_id_to_remove = None
+                with self._vuln_lock:
+                    for vuln_id, vuln_data in self._vulnerabilities.items():
+                        if (vuln_data.get('cwe') == cwe and 
+                            vuln_data.get('description') == description and
+                            vuln_data.get('method') == method and
+                            vuln_data.get('url') == url and
+                            vuln_data.get('timestamp') == timestamp):
+                            vuln_id_to_remove = vuln_id
+                            break
+                
+                if vuln_id_to_remove is not None:
+                    # Remove from table
+                    self._vuln_table_model.removeRow(row)
+                    
+                    # Remove from internal list and database
+                    with self._vuln_lock:
+                        if vuln_id_to_remove in self._vulnerabilities:
+                            del self._vulnerabilities[vuln_id_to_remove]
+                    
+                    self._remove_vulnerability_from_database(vuln_id_to_remove)
+                    
+                    # Update stats
+                    self._update_vulnerability_stats()
+                    
+                    self._show_status_feedback("Vulnerability removed successfully")
+                else:
+                    self._show_status_feedback("Error: Could not find vulnerability to remove")
+            
+        except Exception as e:
+            print("Error removing vulnerability: {}".format(str(e)))
+            self._show_status_feedback("Error removing vulnerability: {}".format(str(e)))
+    
+    def _update_vulnerability_stats(self):
+        """Update vulnerability statistics display"""
+        try:
+            total_count = len(self._vulnerabilities)
+            displayed_count = self._vuln_table_model.getRowCount()
+            unique_requests = len(set(v['request_hash'] for v in self._vulnerabilities.values())) if self._vulnerabilities else 0
+            
+            # Update the stats label
+            if hasattr(self, '_vuln_stats_label'):
+                if displayed_count != total_count:
+                    # Filtered view
+                    self._vuln_stats_label.setText("Showing {} of {} vulnerabilities | {} unique requests".format(
+                        displayed_count, total_count, unique_requests))
+                else:
+                    # All vulnerabilities
+                    self._vuln_stats_label.setText("Total: {} vulnerabilities across {} unique requests".format(
+                        total_count, unique_requests))
+                        
+        except Exception as e:
+            print("Error updating vulnerability stats: {}".format(str(e)))
+    
+    def _update_gui_with_loaded_data(self):
+        """Update GUI components with data loaded from JSON file"""
+        try:
+            # Set flag to prevent saving during GUI update
+            self._is_updating_gui = True
+            print("Starting GUI update - saving disabled to prevent data overwrite")
+            
+            # Update watch paths text area from watch_list_audit
+            if hasattr(self, '_data') and self._data.get('watch_list_audit'):
+                paths = [item.get('path', '') for item in self._data['watch_list_audit'] if item.get('path')]
+                self._path_textarea.setText('\n'.join(paths))
+                self._status_label.setText("Ready - {} path(s) in watch list".format(len(paths)))
+            else:
+                self._path_textarea.setText('')
+                self._status_label.setText("Ready - 0 paths in watch list")
+            
+            # Update watch list table with audit status if available
+            if hasattr(self, '_watch_table_model') and hasattr(self, '_data'):
+                print("Updating table with data. Table model exists: True, Data exists: True")
+                
+                # Clear existing table data thoroughly with enhanced clearing
+                self._watch_table_model.setRowCount(0)
+                self._watch_table_model.fireTableDataChanged()
+                
+                # Force table to recognize the change immediately
+                if hasattr(self, '_watch_table'):
+                    try:
+                        SwingUtilities.invokeLater(lambda: self._watch_table.revalidate())
+                    except:
+                        pass
+                
+                print("Cleared existing table data, now loading new data...")
+                
+                # Load audit data if available
+                if 'watch_list_audit' in self._data and self._data['watch_list_audit']:
+                    print("Loading {} audit items into table".format(len(self._data['watch_list_audit'])))
+                    # Load from detailed audit data
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict):
+                            path = item.get('path', '')
+                            manual_audited = item.get('manual_audited', False)
+                            scanned = item.get('scanned', False)
+                            date_added = item.get('date_added', datetime.now().strftime("%Y-%m-%d %H:%M"))
+                            last_audit = item.get('last_audit', date_added if manual_audited or scanned else "Never")
+                            highlight = item.get('highlight', False)  # Default to false for highlighting
+                            row_data = [path, manual_audited, scanned, last_audit, highlight]
+                            self._watch_table_model.addRow(row_data)
+                            print("Added to table: {} (manual: {}, scanned: {}, last audit: {}, highlight: {})".format(
+                                path, manual_audited, scanned, last_audit, highlight))
+                elif hasattr(self, '_data') and self._data.get('watch_list_audit'):
+                    print("Creating table entries from watch list audit data")
+                    # Fallback: create table entries from watch list audit data
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict):
+                            path = item.get('path', '')
+                            manual_audited = item.get('manual_audited', False)
+                            scanned = item.get('scanned', False)
+                            last_audit = item.get('last_audit', "Never")
+                            highlight = item.get('highlight', False)
+                            row_data = [path, manual_audited, scanned, last_audit, highlight]
+                            self._watch_table_model.addRow(row_data)
+                            print("Added to table (fallback): {}".format(path))
+                else:
+                    print("No path data found to populate table")
+                
+                # Update status with audit counts
+                total_paths = self._watch_table_model.getRowCount()
+                if total_paths > 0:
+                    audited_count = 0
+                    for row in range(total_paths):
+                        if self._watch_table_model.getValueAt(row, 1):  # Audited column
+                            audited_count += 1
+                    
+                    self._status_label.setText("Ready - {} paths ({} audited, {} pending)".format(
+                        total_paths, audited_count, total_paths - audited_count))
+                    print("Table populated with {} paths ({} audited)".format(total_paths, audited_count))
+                else:
+                    print("Table is empty after update attempt")
+                
+                # Enhanced table refresh - fire multiple events to ensure GUI updates
+                try:
+                    self._watch_table_model.fireTableDataChanged()
+                    self._watch_table_model.fireTableStructureChanged()
+                    print("Fired table data changed events")
+                    
+                    # Force immediate table component refresh
+                    if hasattr(self, '_watch_table'):
+                        SwingUtilities.invokeLater(lambda: self._watch_table.revalidate())
+                        SwingUtilities.invokeLater(lambda: self._watch_table.repaint())
+                        print("Forced table component refresh")
+                except Exception as table_error:
+                    print("Error firing table events: {}".format(str(table_error)))
+            else:
+                if not hasattr(self, '_watch_table_model'):
+                    print("Watch table model not found")
+                if not hasattr(self, '_data'):
+                    print("Data attribute not found")
+            
+            # Update project info
+            if hasattr(self, '_current_project_name'):
+                project_info = "Project: {} ({} projects available)".format(
+                    self._current_project_name, 
+                    len(self._project_mappings)
+                )
+                self._project_info_label.setText(project_info)
+            
+            # Update vulnerabilities table
+            self._refresh_vulnerability_table()
+            
+            # Update progress bar display
+            self._update_audit_status_display()
+            
+            # Force repaint of table components to ensure they show the new data
+            if hasattr(self, '_watch_table'):
+                try:
+                    SwingUtilities.invokeLater(lambda: self._watch_table.repaint())
+                except:
+                    pass
+            
+            if hasattr(self, '_vuln_table'):
+                try:
+                    SwingUtilities.invokeLater(lambda: self._vuln_table.repaint())
+                except:
+                    pass
+            
+            # Get path count from watch_list_audit
+            path_count = len(self._data.get('watch_list_audit', [])) if hasattr(self, '_data') else 0
+            print("GUI updated with loaded data: {} paths, {} vulnerabilities".format(
+                path_count, len(self._vulnerabilities)))
+            print("Project switch complete: Configuration and paths loaded for project '{}'".format(
+                getattr(self, '_current_project_name', 'Unknown')))
+            
+            # Clear the flag to re-enable saving
+            self._is_updating_gui = False
+            print("GUI update completed - saving re-enabled")
+                
+        except Exception as e:
+            print("Error updating GUI with loaded data: {}".format(str(e)))
+            # Ensure flag is cleared even on error
+            self._is_updating_gui = False
+            traceback.print_exc()
+    
+    def _update_paths(self, event):
+        """Update the path list from the text area"""
+        try:
+            text = self._path_textarea.getText()
+            new_path_list = [line.strip() for line in text.split('\n') if line.strip()]
+            
+            # Update watch_list_audit with new paths
+            if not hasattr(self, '_data'):
+                self._data = {}
+            
+            # Create new watch list audit data
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self._data['watch_list_audit'] = []
+            for path in new_path_list:
+                self._data['watch_list_audit'].append({
+                    'path': path,
+                    'manual_audited': False,
+                    'scanned': False,
+                    'last_audit': 'Never',
+                    'highlight': False
+                })
+            
+            # Sync to table if it exists
+            if hasattr(self, '_watch_table_model'):
+                self._sync_text_to_table()
+                # Save watch list data with audit status
+                self._save_watch_list_data()
+            else:
+                # Fallback: save using the new method
+                def save_in_background():
+                    try:
+                        self._save_watch_list_to_database()
+                    except Exception as e:
+                        print("Error saving watch list in background: {}".format(str(e)))
+                
+                # Run save operation in background thread
+                save_thread = threading.Thread(target=save_in_background)
+                save_thread.daemon = True
+                save_thread.start()
+            
+            # Update status
+            count = len(new_path_list)
+            self._status_label.setText("Ready - {} path(s) in watch list".format(count))
+            
+            print("Watch list updated: {} paths loaded".format(count))
+            for path in new_path_list:
+                print("  - {}".format(path))
+            
+        except Exception as e:
+            print("Error updating paths: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error updating watch list: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _clear_paths(self, event):
+        """Clear all paths from the list"""
+        try:
+            self._path_textarea.setText("")
+            
+            # Clear watch_list_audit data
+            if not hasattr(self, '_data'):
+                self._data = {}
+            self._data['watch_list_audit'] = []
+            
+            self._status_label.setText("Ready - 0 paths in watch list")
+            
+            # Save to JSON file in background
+            def save_in_background():
+                try:
+                    self._save_watch_list_to_database()
+                except Exception as e:
+                    print("Error saving cleared watch list: {}".format(str(e)))
+            
+            save_thread = threading.Thread(target=save_in_background)
+            save_thread.daemon = True
+            save_thread.start()
+            
+            print("Watch list cleared")
+            
+        except Exception as e:
+            print("Error clearing paths: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error clearing watch list: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _load_sample(self, event):
+        """Load sample paths for demonstration"""
+        try:
+            sample_paths = [
+                "/admin/*",
+                "/api/v1/*",
+                "/login",
+                "/logout", 
+                "/dashboard",
+                "/user/profile",
+                "/config/*",
+                "/debug/*",
+                "/test/*",
+                "*/upload",
+                "*/download",
+                "/rpc/construction/apartment/*"
+            ]
+            
+            self._path_textarea.setText('\n'.join(sample_paths))
+            self._update_paths(None)
+            
+        except Exception as e:
+            print("Error loading sample paths: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error loading sample paths: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _import_watch_list(self, event):
+        """Import watch list from a file"""
+        try:
+            # Open file dialog
+            file_chooser = JFileChooser()
+            file_chooser.setFileFilter(FileNameExtensionFilter("Text files (*.txt)", ["txt"]))
+            file_chooser.setFileFilter(FileNameExtensionFilter("JSON files (*.json)", ["json"]))
+            file_chooser.setFileFilter(FileNameExtensionFilter("All supported files", ["txt", "json"]))
+            
+            result = file_chooser.showOpenDialog(None)
+            if result != JFileChooser.APPROVE_OPTION:
+                return
+            
+            selected_file = file_chooser.getSelectedFile()
+            file_path = selected_file.getAbsolutePath()
+            
+            # Read file content
+            with open(file_path, 'r') as f:
+                content = f.read().strip()
+            
+            # Parse content based on file type
+            new_paths = []
+            if file_path.lower().endswith('.json'):
+                try:
+                    import json
+                    data = json.loads(content)
+                    if isinstance(data, list):
+                        new_paths = [str(item) for item in data]
+                    elif isinstance(data, dict) and 'paths' in data:
+                        new_paths = [str(item) for item in data['paths']]
+                    else:
+                        # Try to extract strings from dict values
+                        for value in data.values():
+                            if isinstance(value, list):
+                                new_paths.extend([str(item) for item in value])
+                            elif isinstance(value, str):
+                                new_paths.append(value)
+                except:
+                    # Fallback to treating as text
+                    new_paths = [line.strip() for line in content.split('\n') if line.strip()]
+            else:
+                # Text file - one path per line
+                new_paths = [line.strip() for line in content.split('\n') if line.strip()]
+            
+            if not new_paths:
+                self._show_status_feedback("No valid paths found in file")
+                return
+            
+            # Add paths to table with audit status
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            imported_count = 0
+            
+            # Get existing paths to avoid duplicates
+            existing_paths = set()
+            for row in range(self._watch_table_model.getRowCount()):
+                existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+            
+            for path in new_paths:
+                if path and path not in existing_paths:
+                    # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Highlight (False)]
+                    row_data = [path, False, False, "Never", False]
+                    self._watch_table_model.addRow(row_data)
+                    imported_count += 1
+            
+            # Update text area to sync
+            self._sync_table_to_text()
+            
+            # Save the data
+            self._save_watch_list_data()
+            
+            # Update status
+            total_paths = self._watch_table_model.getRowCount()
+            self._status_label.setText("Ready - {} paths in watch list ({} imported)".format(total_paths, imported_count))
+            
+            # Update progress display
+            self._update_audit_status_display()
+            
+            # Show feedback
+            self._show_status_feedback("Imported {} new paths from file".format(imported_count))
+            
+        except Exception as e:
+            self._show_status_feedback("Error importing file: {}".format(str(e)))
+            print("Import error: {}".format(str(e)))
+    
+    def _import_from_sitemap(self, event):
+        """Import endpoints from Burp's Target sitemap with configuration dialog"""
+        try:
+            print("\n=== SITEMAP IMPORT STARTED ===")
+            
+            # Debug: Check basic requirements
+            if not hasattr(self, '_callbacks'):
+                print("ERROR: _callbacks not found!")
+                return
+            
+            if not hasattr(self._callbacks, 'getSiteMap'):
+                print("ERROR: getSiteMap method not available!")
+                return
+            
+            # Quick test of sitemap access
+            try:
+                test_sitemap = self._callbacks.getSiteMap(None)
+                print("DEBUG: Sitemap test returned {} entries".format(len(test_sitemap) if test_sitemap else 0))
+            except Exception as e:
+                print("ERROR: Cannot access sitemap - {}".format(str(e)))
+                return
+            
+            # Show configuration dialog
+            print("DEBUG: Showing configuration dialog...")
+            config = self._show_sitemap_import_config()
+            if not config:
+                print("DEBUG: User cancelled configuration dialog")
+                return  # User cancelled
+            
+            print("DEBUG: Configuration received - Target: {}".format(config.get("target", "None")))
+            
+            # Get sitemap data from Burp
+            print("DEBUG: Extracting sitemap data...")
+            sitemap_data = self._extract_sitemap_data(config)
+            if not sitemap_data:
+                print("DEBUG: No sitemap data returned")
+                self._show_status_feedback("No endpoints found in sitemap for target")
+                return
+            
+            print("DEBUG: Got {} sitemap entries".format(len(sitemap_data)))
+            
+            # Process and filter the endpoints
+            print("DEBUG: Filtering endpoints...")
+            filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, config)
+            if not filtered_endpoints:
+                print("DEBUG: No endpoints passed filtering")
+                self._show_status_feedback("No endpoints match the filter criteria")
+                return
+            
+            print("DEBUG: {} endpoints passed filtering".format(len(filtered_endpoints)))
+            
+            # Add to watch list
+            print("DEBUG: Adding endpoints to watchlist...")
+            imported_count = self._add_endpoints_to_watchlist(filtered_endpoints)
+            print("DEBUG: Added {} new endpoints to watchlist".format(imported_count))
+            
+            # Save configuration if auto-update is enabled
+            if config.get("auto_update", False):
+                print("DEBUG: Saving sitemap configuration for auto-update")
+                self._sitemap_config = config
+                self._save_sitemap_config()
+                self._start_sitemap_monitoring()
+            
+            # Save and update UI
+            print("DEBUG: Saving data and updating UI...")
+            self._save_watch_list_data()
+            self._update_audit_status_display()
+            
+            # Show feedback
+            auto_update_msg = " (auto-update enabled)" if config.get("auto_update", False) else ""
+            success_msg = "Imported {} endpoints from sitemap{}".format(imported_count, auto_update_msg)
+            print("SUCCESS: {}".format(success_msg))
+            self._show_status_feedback(success_msg)
+            
+            print("=== SITEMAP IMPORT COMPLETED ===\n")
+            
+        except Exception as e:
+            error_msg = "Error importing from sitemap: {}".format(str(e))
+            print("ERROR: {}".format(error_msg))
+            print("Exception details:", e)
+            import traceback
+            traceback.print_exc()
+            self._show_status_feedback(error_msg)
+    
+    def _show_sitemap_import_config(self):
+        """Show configuration dialog for sitemap import"""
+        try:
+            from javax.swing import JDialog, JFrame, JTextField, JTextArea, JCheckBox, JLabel, JPanel, JComboBox, JScrollPane, JOptionPane
+            from java.awt import GridBagLayout, GridBagConstraints, Insets
+            
+            print("Starting sitemap import configuration dialog...")
+            
+            # Create dialog
+            dialog_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            gbc.insets = Insets(5, 5, 5, 5)
+            gbc.anchor = GridBagConstraints.WEST
+            
+            # Target selection
+            gbc.gridx = 0
+            gbc.gridy = 0
+            dialog_panel.add(JLabel("Target Host:"), gbc)
+            
+            # Get available targets from sitemap
+            available_targets = self._get_available_targets()
+            target_combo = JComboBox(available_targets if available_targets else ["No targets found"])
+            gbc.gridx = 1
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            dialog_panel.add(target_combo, gbc)
+            
+            # Out-scope extensions
+            gbc.gridx = 0
+            gbc.gridy = 1
+            gbc.fill = GridBagConstraints.NONE
+            dialog_panel.add(JLabel("Exclude Extensions:"), gbc)
+            
+            extensions_field = JTextField("js,gif,jpg,css,svg,png,woff,pdf", 30)
+            gbc.gridx = 1
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            dialog_panel.add(extensions_field, gbc)
+            
+            # Exclude patterns
+            gbc.gridx = 0
+            gbc.gridy = 2
+            gbc.fill = GridBagConstraints.NONE
+            dialog_panel.add(JLabel("Exclude Path Patterns:"), gbc)
+            
+            exclude_area = JTextArea(3, 30)
+            exclude_area.setText("*/admin/login/*\n*/logout\n*/static/*")
+            exclude_scroll = JScrollPane(exclude_area)
+            gbc.gridx = 1
+            gbc.fill = GridBagConstraints.BOTH
+            dialog_panel.add(exclude_scroll, gbc)
+            
+            # Exclude status codes
+            gbc.gridx = 0
+            gbc.gridy = 3
+            gbc.fill = GridBagConstraints.NONE
+            dialog_panel.add(JLabel("Exclude Status Codes:"), gbc)
+            
+            status_field = JTextField("101,404,500", 15)
+            gbc.gridx = 1
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            dialog_panel.add(status_field, gbc)
+            
+            # Auto-update checkbox
+            gbc.gridx = 0
+            gbc.gridy = 4
+            gbc.gridwidth = 2
+            auto_update_checkbox = JCheckBox("Auto-update when sitemap changes", False)
+            dialog_panel.add(auto_update_checkbox, gbc)
+            
+            # Instructions
+            gbc.gridy = 5
+            instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'")
+            dialog_panel.add(instructions, gbc)
+            
+            # Show dialog
+            result = JOptionPane.showConfirmDialog(
+                None,
+                dialog_panel,
+                "Import from Sitemap - Configuration",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.OK_OPTION:
+                selected_target = str(target_combo.getSelectedItem()) if target_combo.getSelectedItem() else None
+                if not selected_target or selected_target == "No targets found":
+                    return None
+                
+                return {
+                    "target": selected_target,
+                    "exclude_extensions": [ext.strip().lower() for ext in extensions_field.getText().split(",") if ext.strip()],
+                    "exclude_patterns": [pattern.strip() for pattern in exclude_area.getText().split("\n") if pattern.strip()],
+                    "exclude_status_codes": [int(code.strip()) for code in status_field.getText().split(",") if code.strip().isdigit()],
+                    "auto_update": auto_update_checkbox.isSelected()
+                }
+            
+            return None
+            
+        except Exception as e:
+            print("Error showing sitemap config dialog: {}".format(str(e)))
+            return None
+    
+    def _get_available_targets(self):
+        """Get list of available targets from Burp's sitemap"""
+        try:
+            print("Getting available targets from sitemap...")
+            targets = set()
+            
+            # Get all HTTP messages from the proxy history/sitemap
+            if hasattr(self._callbacks, 'getSiteMap'):
+                # Try to get sitemap for all URLs (pass None to get all)
+                print("Attempting to get sitemap data...")
+                site_map = self._callbacks.getSiteMap(None)
+                print("Got {} sitemap entries".format(len(site_map) if site_map else 0))
+                
+                if site_map:
+                    for message_info in site_map:
+                        if message_info:
+                            try:
+                                request_info = self._helpers.analyzeRequest(message_info)
+                                url = request_info.getUrl()
+                                if url:
+                                    host = url.getHost()
+                                    port = url.getPort()
+                                    
+                                    # Create host:port format, but handle default ports
+                                    if port in [80, 443, -1]:
+                                        host_port = host
+                                    else:
+                                        host_port = "{}:{}".format(host, port)
+                                    
+                                    targets.add(host_port)
+                                    print("Added target: {}".format(host_port))
+                            except Exception as e:
+                                print("Error processing sitemap entry: {}".format(str(e)))
+                                continue
+            
+            # If no targets found, try proxy history
+            if not targets and hasattr(self._callbacks, 'getProxyHistory'):
+                print("No sitemap targets found, trying proxy history...")
+                proxy_history = self._callbacks.getProxyHistory()
+                print("Got {} proxy history entries".format(len(proxy_history) if proxy_history else 0))
+                
+                if proxy_history:
+                    for message_info in proxy_history:
+                        if message_info:
+                            try:
+                                request_info = self._helpers.analyzeRequest(message_info)
+                                url = request_info.getUrl()
+                                if url:
+                                    host = url.getHost()
+                                    port = url.getPort()
+                                    
+                                    # Create host:port format, but handle default ports
+                                    if port in [80, 443, -1]:
+                                        host_port = host
+                                    else:
+                                        host_port = "{}:{}".format(host, port)
+                                    
+                                    targets.add(host_port)
+                                    print("Added proxy target: {}".format(host_port))
+                            except Exception as e:
+                                print("Error processing proxy entry: {}".format(str(e)))
+                                continue
+            
+            target_list = sorted(list(targets)) if targets else []
+            print("Final targets found: {}".format(target_list))
+            return target_list
+            
+        except Exception as e:
+            print("Error getting available targets: {}".format(str(e)))
+            return []
+    
+    def _extract_sitemap_data(self, config):
+        """Extract sitemap data for the specified target"""
+        try:
+            target_host = config["target"]
+            print("Extracting sitemap data for target: {}".format(target_host))
+            sitemap_data = []
+            
+            # Parse target host and port
+            if ":" in target_host:
+                host, port_str = target_host.split(":", 1)
+                try:
+                    port = int(port_str)
+                except ValueError:
+                    print("Invalid port in target: {}".format(target_host))
+                    return []
+            else:
+                host = target_host
+                port = -1
+            
+            print("Parsed target - Host: {}, Port: {}".format(host, port))
+            
+            # Get sitemap entries for the target
+            if hasattr(self._callbacks, 'getSiteMap'):
+                # Build URL pattern for the target - try both HTTP and HTTPS
+                url_patterns = []
+                if port == 443:
+                    url_patterns.append("https://{}".format(host))
+                elif port == 80:
+                    url_patterns.append("http://{}".format(host))
+                elif port == -1:
+                    # Try both HTTP and HTTPS for default ports
+                    url_patterns.append("http://{}".format(host))
+                    url_patterns.append("https://{}".format(host))
+                else:
+                    # Try both protocols with custom port
+                    url_patterns.append("http://{}:{}".format(host, port))
+                    url_patterns.append("https://{}:{}".format(host, port))
+                
+                print("Trying URL patterns: {}".format(url_patterns))
+                
+                for base_url in url_patterns:
+                    try:
+                        print("Getting sitemap for: {}".format(base_url))
+                        site_map = self._callbacks.getSiteMap(base_url)
+                        
+                        if site_map:
+                            print("Found {} entries for {}".format(len(site_map), base_url))
+                            
+                            for message_info in site_map:
+                                if message_info:
+                                    try:
+                                        request_info = self._helpers.analyzeRequest(message_info)
+                                        url = request_info.getUrl()
+                                        
+                                        if url and url.getHost() == host:
+                                            # Check port matching
+                                            url_port = url.getPort()
+                                            port_matches = False
+                                            
+                                            if port == -1:
+                                                # Accept any default port
+                                                port_matches = url_port in [80, 443, -1]
+                                            else:
+                                                # Exact port match
+                                                port_matches = (url_port == port)
+                                            
+                                            if port_matches:
+                                                response = message_info.getResponse()
+                                                status_code = 200  # Default
+                                                
+                                                if response:
+                                                    try:
+                                                        response_info = self._helpers.analyzeResponse(response)
+                                                        status_code = response_info.getStatusCode()
+                                                    except:
+                                                        pass
+                                                
+                                                entry = {
+                                                    "url": url,
+                                                    "method": request_info.getMethod(),
+                                                    "path": url.getPath() if url.getPath() else "/",
+                                                    "status_code": status_code,
+                                                    "response": response,  # Include response for MIME type checking
+                                                    "message_info": message_info
+                                                }
+                                                
+                                                sitemap_data.append(entry)
+                                                print("Added entry: {} {} (status: {})".format(entry["method"], entry["path"], status_code))
+                                    
+                                    except Exception as e:
+                                        print("Error processing message: {}".format(str(e)))
+                                        continue
+                        else:
+                            print("No sitemap entries found for: {}".format(base_url))
+                            
+                    except Exception as e:
+                        print("Error getting sitemap for {}: {}".format(base_url, str(e)))
+                        continue
+            
+            print("Total extracted {} entries from sitemap for target {}".format(len(sitemap_data), target_host))
+            return sitemap_data
+            
+        except Exception as e:
+            print("Error extracting sitemap data: {}".format(str(e)))
+            return []
+    
+    def _filter_sitemap_endpoints(self, sitemap_data, config):
+        """Filter sitemap endpoints based on configuration"""
+        try:
+            filtered_endpoints = set()  # Use set to ensure uniqueness
+            exclude_extensions = config.get("exclude_extensions", [])
+            exclude_patterns = config.get("exclude_patterns", [])
+            exclude_status_codes = config.get("exclude_status_codes", [])
+            exclude_mime_types = config.get("exclude_mime_types", [])
+            
+            print("DEBUG: Filtering {} entries with config:".format(len(sitemap_data)))
+            print("  Exclude MIME types: {}".format(exclude_mime_types))
+            print("  Exclude extensions: {}".format(exclude_extensions))
+            print("  Exclude status codes: {}".format(exclude_status_codes))
+            
+            for entry in sitemap_data:
+                url = entry["url"]
+                path = entry["path"]
+                status_code = entry.get("status_code", 200)
+                response = entry.get("response", None)
+                
+                # Remove query parameters for uniqueness
+                clean_path = path.split("?")[0] if "?" in path else path
+                
+                print("DEBUG: Processing entry: {} (status: {})".format(clean_path, status_code))
+                
+                # Check status code exclusion
+                if status_code in exclude_status_codes:
+                    print("DEBUG: Excluding {} due to status code {}".format(clean_path, status_code))
+                    continue
+                
+                # Check file extension exclusion
+                if self._has_excluded_extension(clean_path, exclude_extensions):
+                    print("DEBUG: Excluding {} due to file extension".format(clean_path))
+                    continue
+                
+                # Check pattern exclusion
+                if self._matches_exclude_pattern(clean_path, exclude_patterns):
+                    print("DEBUG: Excluding {} due to path pattern".format(clean_path))
+                    continue
+                
+                # Check MIME type exclusion
+                if self._has_excluded_mime_type(response, exclude_mime_types):
+                    print("DEBUG: Excluding {} due to MIME type".format(clean_path))
+                    continue
+                
+                # Add to filtered set (ensures uniqueness)
+                filtered_endpoints.add(clean_path)
+                print("DEBUG: Including {} in filtered results".format(clean_path))
+            
+            print("Filtered {} unique endpoints from {} total entries".format(len(filtered_endpoints), len(sitemap_data)))
+            return list(filtered_endpoints)
+            
+        except Exception as e:
+            print("Error filtering sitemap endpoints: {}".format(str(e)))
+            return []
+    
+    def _has_excluded_extension(self, path, exclude_extensions):
+        """Check if path has an excluded file extension"""
+        try:
+            if not exclude_extensions:
+                return False
+            
+            # Get file extension
+            if "." in path:
+                extension = path.split(".")[-1].lower()
+                return extension in exclude_extensions
+            
+            return False
+            
+        except Exception as e:
+            print("Error checking excluded extension: {}".format(str(e)))
+            return False
+    
+    def _matches_exclude_pattern(self, path, exclude_patterns):
+        """Check if path matches any exclude pattern"""
+        try:
+            if not exclude_patterns:
+                return False
+            
+            for pattern in exclude_patterns:
+                if self._matches_wildcard_pattern(path, pattern):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print("Error checking exclude patterns: {}".format(str(e)))
+            return False
+    
+    def _matches_wildcard_pattern(self, path, pattern):
+        """Check if path matches a wildcard pattern"""
+        try:
+            # Convert wildcard pattern to regex
+            if pattern.startswith("*/") and pattern.endswith("/*"):
+                # */pattern/* - matches any path containing 'pattern'
+                inner_pattern = pattern[2:-2]  # Remove */ and /*
+                return inner_pattern in path
+            elif pattern.startswith("/") and pattern.endswith("/*"):
+                # /pattern/* - matches paths starting with '/pattern/'
+                prefix = pattern[:-2]  # Remove /*
+                return path.startswith(prefix)
+            elif pattern.endswith("/*"):
+                # pattern/* - matches paths starting with 'pattern'
+                prefix = pattern[:-2]  # Remove /*
+                return path.startswith(prefix)
+            elif pattern.startswith("*/"):
+                # */pattern - matches paths ending with 'pattern'
+                suffix = pattern[2:]  # Remove */
+                return path.endswith(suffix)
+            else:
+                # Exact match or contains
+                return pattern in path
+                
+        except Exception as e:
+            print("Error matching wildcard pattern: {}".format(str(e)))
+            return False
+    
+    def _has_excluded_mime_type(self, response, exclude_mime_types):
+        """Check if response has excluded MIME type"""
+        try:
+            if not response or not exclude_mime_types:
+                return False
+            
+            # Analyze the response to get MIME type using Burp's helpers
+            try:
+                response_info = self._helpers.analyzeResponse(response)
+                inferred_mime_type = response_info.getInferredMimeType()
+                
+                if inferred_mime_type:
+                    # Convert Burp MimeType enum to string for comparison
+                    mime_type_str = str(inferred_mime_type).lower()
+                    
+                    # Check against excluded MIME types
+                    for excluded_mime in exclude_mime_types:
+                        excluded_mime_lower = excluded_mime.strip().lower()
+                        
+                        # Handle common MIME type mappings
+                        if self._mime_type_matches(mime_type_str, excluded_mime_lower):
+                            print("DEBUG: Excluding {} due to MIME type {} matching filter {}".format(
+                                "response", mime_type_str, excluded_mime_lower))
+                            return True
+                
+            except Exception as mime_error:
+                print("Error getting MIME type from response: {}".format(str(mime_error)))
+                
+                # Fallback: try to determine from Content-Type header
+                try:
+                    headers = response_info.getHeaders() if response_info else []
+                    content_type = None
+                    
+                    for header in headers:
+                        header_str = str(header).lower()
+                        if header_str.startswith("content-type:"):
+                            content_type = header_str.split(":", 1)[1].strip() if ":" in header_str else ""
+                            break
+                    
+                    if content_type:
+                        mime_type = self._infer_mime_type_from_content_type(content_type)
+                        if mime_type:
+                            for excluded_mime in exclude_mime_types:
+                                excluded_mime_lower = excluded_mime.strip().lower()
+                                if self._mime_type_matches(mime_type, excluded_mime_lower):
+                                    print("DEBUG: Excluding response due to Content-Type {} matching filter {}".format(
+                                        content_type, excluded_mime_lower))
+                                    return True
+                                    
+                except Exception as header_error:
+                    print("Error checking Content-Type header: {}".format(str(header_error)))
+            
+            return False
+            
+        except Exception as e:
+            print("Error checking MIME type exclusion: {}".format(str(e)))
+            return False
+    
+    def _infer_mime_type_from_content_type(self, content_type):
+        """Infer MIME type from Content-Type header"""
+        try:
+            if not content_type:
+                return None
+            
+            # Map common content types to MIME type categories
+            if "text/html" in content_type:
+                return "html"
+            elif "application/json" in content_type:
+                return "json"
+            elif "application/xml" in content_type or "text/xml" in content_type:
+                return "xml"
+            elif "image/" in content_type:
+                return "image"
+            elif "video/" in content_type:
+                return "video"
+            elif "audio/" in content_type:
+                return "sound"
+            elif "font/" in content_type or "application/font" in content_type:
+                return "font"
+            elif "text/css" in content_type:
+                return "css"
+            elif "javascript" in content_type or "application/javascript" in content_type:
+                return "script"
+            else:
+                return "other"
+                
+        except Exception as e:
+            print("Error inferring MIME type: {}".format(str(e)))
+            return None
+    
+    def _mime_type_matches(self, mime_type_str, excluded_mime):
+        """Check if MIME type matches excluded pattern"""
+        try:
+            # Direct match
+            if excluded_mime in mime_type_str:
+                return True
+            
+            # Handle Burp MimeType enum values and aliases
+            mime_mappings = {
+                "image": ["image", "img", "gif", "jpeg", "jpg", "png", "svg", "bmp", "webp"],
+                "video": ["video", "vid", "mp4", "avi", "mov", "wmv", "flv"],
+                "sound": ["sound", "audio", "mp3", "wav", "ogg", "m4a", "flac"],
+                "font": ["font", "woff", "woff2", "ttf", "otf", "eot"],
+                "css": ["css", "stylesheet"],
+                "script": ["script", "javascript", "js", "ecmascript"],
+                "html": ["html", "htm"],
+                "json": ["json", "application_json"],
+                "xml": ["xml", "application_xml", "text_xml"]
+            }
+            
+            # Check if the MIME type string contains any variations
+            for mime_category, aliases in mime_mappings.items():
+                if excluded_mime == mime_category:
+                    for alias in aliases:
+                        if alias in mime_type_str:
+                            return True
+            
+            # Special handling for common Burp MIME type enum values
+            burp_mime_mappings = {
+                "xml": ["xml", "application_xml", "text_xml"],
+                "json": ["json", "application_json"],
+                "html": ["html", "text_html"],
+                "css": ["css", "text_css"],
+                "script": ["script", "javascript", "application_javascript", "text_javascript"],
+                "image": ["image", "gif", "jpeg", "png"]
+            }
+            
+            for excluded_type, burp_variations in burp_mime_mappings.items():
+                if excluded_mime == excluded_type:
+                    for variation in burp_variations:
+                        if variation in mime_type_str:
+                            return True
+            
+            return False
+            
+        except Exception as e:
+            print("Error matching MIME type: {}".format(str(e)))
+            return False
+
+    def _add_endpoints_to_watchlist(self, endpoints):
+        """Add filtered endpoints to the watch list"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return 0
+            
+            # Get existing paths to avoid duplicates
+            existing_paths = set()
+            for row in range(self._watch_table_model.getRowCount()):
+                existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+            
+            imported_count = 0
+            for endpoint in endpoints:
+                if endpoint and endpoint not in existing_paths:
+                    # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Highlight (False)]
+                    row_data = [endpoint, False, False, "Never", False]
+                    self._watch_table_model.addRow(row_data)
+                    imported_count += 1
+            
+            # Update text area to sync
+            self._sync_table_to_text()
+            
+            return imported_count
+            
+        except Exception as e:
+            print("Error adding endpoints to watchlist: {}".format(str(e)))
+            return 0
+    
+    def _save_sitemap_config(self):
+        """Save sitemap configuration to data file"""
+        try:
+            if self._sitemap_config:
+                # Save to file
+                data = self._load_data_from_file()
+                if 'settings' not in data:
+                    data['settings'] = {}
+                data['settings']['sitemap_config'] = self._sitemap_config
+                self._save_data_to_file(data)
+                
+                # Refresh cached data to stay in sync
+                self._data = data
+                
+                print("Sitemap configuration saved")
+                print("  Saved patterns: {}".format(self._sitemap_config.get('exclude_patterns', [])))
+                
+        except Exception as e:
+            print("Error saving sitemap config: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+    
+    def _load_sitemap_config(self):
+        """Load sitemap configuration from data file"""
+        try:
+            # Always read fresh data from file to avoid stale cached data
+            data = self._load_data_from_file()
+            config = data.get('settings', {}).get('sitemap_config', None)
+            
+            if config:
+                self._sitemap_config = config
+                print("Loaded sitemap configuration for target: {}".format(config.get('target', 'unknown')))
+                print("  Exclude patterns: {}".format(config.get('exclude_patterns', [])))
+                print("  Exclude extensions: {}".format(config.get('exclude_extensions', [])))
+                return config
+            else:
+                print("No sitemap configuration found in data file")
+                    
+        except Exception as e:
+            print("Error loading sitemap config: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+        
+        return None
+    
+    def _start_sitemap_monitoring(self):
+        """Start monitoring sitemap for changes"""
+        try:
+            if not self._sitemap_config:
+                return
+            
+            # Stop existing monitoring thread if any
+            self._stop_sitemap_monitoring()
+            
+            # Start new monitoring thread
+            def monitor_sitemap():
+                import time
+                last_sitemap_size = 0
+                check_counter = 0
+                
+                # Get monitoring frequency from config
+                monitor_frequency = self._sitemap_config.get("monitor_frequency", 5)
+                full_check_interval = max(6, int(30 / monitor_frequency))  # Ensure full check at least every 30 seconds
+                
+                print("DEBUG: Starting sitemap monitoring with {} second intervals".format(monitor_frequency))
+                
+                while self._sitemap_config and self._sitemap_config.get("auto_update", False):
+                    try:
+                        time.sleep(monitor_frequency)  # Use configured frequency
+                        check_counter += 1
+                        
+                        if self._sitemap_config:
+                            # Quick size check every iteration to detect changes
+                            current_sitemap_size = self._get_sitemap_size()
+                            
+                            # If sitemap size changed or periodic full check
+                            if (current_sitemap_size > last_sitemap_size or 
+                                check_counter % full_check_interval == 0):
+                                
+                                print("DEBUG: Sitemap monitoring - size changed ({} -> {}) or periodic check (interval: {}s)".format(
+                                    last_sitemap_size, current_sitemap_size, monitor_frequency))
+                                
+                                self._check_sitemap_updates()
+                                last_sitemap_size = current_sitemap_size
+                            
+                    except Exception as e:
+                        print("Error in sitemap monitoring: {}".format(str(e)))
+                        break
+            
+            self._sitemap_monitor_thread = threading.Thread(target=monitor_sitemap)
+            self._sitemap_monitor_thread.daemon = True
+            self._sitemap_monitor_thread.start()
+            
+            print("Started sitemap monitoring for target: {}".format(self._sitemap_config.get('target', 'unknown')))
+            
+        except Exception as e:
+            print("Error starting sitemap monitoring: {}".format(str(e)))
+    
+    def _stop_sitemap_monitoring(self):
+        """Stop sitemap monitoring"""
+        try:
+            if self._sitemap_monitor_thread and self._sitemap_monitor_thread.is_alive():
+                # Signal thread to stop by clearing config
+                old_config = self._sitemap_config
+                self._sitemap_config = None
+                
+                # Wait a bit for thread to notice
+                import time
+                time.sleep(1)
+                
+                print("Stopped sitemap monitoring")
+                
+        except Exception as e:
+            print("Error stopping sitemap monitoring: {}".format(str(e)))
+    
+    def _get_sitemap_size(self):
+        """Get approximate size of sitemap for quick change detection"""
+        try:
+            if not self._sitemap_config:
+                return 0
+            
+            target_host = self._sitemap_config["target"]
+            
+            # Parse target host and port
+            if ":" in target_host:
+                host, port_str = target_host.split(":", 1)
+                port = int(port_str)
+            else:
+                host = target_host
+                port = 443 if target_host.startswith("https") else 80
+            
+            sitemap_size = 0
+            
+            # Quick count of sitemap entries for the target
+            if hasattr(self._callbacks, 'getSiteMap'):
+                url_patterns = [
+                    "https://{}:{}".format(host, port),
+                    "http://{}:{}".format(host, port),
+                    "https://{}".format(host),
+                    "http://{}".format(host)
+                ]
+                
+                for base_url in url_patterns:
+                    try:
+                        sitemap_entries = self._callbacks.getSiteMap(base_url)
+                        if sitemap_entries:
+                            sitemap_size += len(sitemap_entries)
+                    except:
+                        continue
+            
+            return sitemap_size
+            
+        except Exception as e:
+            print("Error getting sitemap size: {}".format(str(e)))
+            return 0
+    
+    def _check_sitemap_updates(self):
+        """Check for new endpoints in sitemap and add them to watch list"""
+        try:
+            import time
+            
+            if not self._sitemap_config:
+                return
+            
+            print("DEBUG: Checking for sitemap updates...")
+            start_time = time.time()
+            
+            # Get current sitemap data
+            sitemap_data = self._extract_sitemap_data(self._sitemap_config)
+            if not sitemap_data:
+                print("DEBUG: No sitemap data found")
+                return
+            
+            print("DEBUG: Got {} sitemap entries in {:.2f}s".format(len(sitemap_data), time.time() - start_time))
+            
+            # Filter endpoints
+            filter_start = time.time()
+            filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, self._sitemap_config)
+            if not filtered_endpoints:
+                print("DEBUG: No endpoints passed filtering")
+                return
+            
+            print("DEBUG: Filtered to {} endpoints in {:.2f}s".format(len(filtered_endpoints), time.time() - filter_start))
+            
+            # Check for new endpoints efficiently
+            new_endpoints = []
+            if hasattr(self, '_watch_table_model'):
+                # Build existing paths set for O(1) lookups
+                existing_paths = set()
+                for row in range(self._watch_table_model.getRowCount()):
+                    existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+                
+                # Find new endpoints
+                for endpoint in filtered_endpoints:
+                    if endpoint not in existing_paths:
+                        new_endpoints.append(endpoint)
+            
+            # Add new endpoints if any
+            if new_endpoints:
+                print("DEBUG: Adding {} new endpoints".format(len(new_endpoints)))
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                
+                for endpoint in new_endpoints:
+                    row_data = [endpoint, False, False, "Never", False]
+                    self._watch_table_model.addRow(row_data)
+                
+                # Update UI and save
+                self._sync_table_to_text()
+                self._save_watch_list_data()
+                self._update_audit_status_display()
+                
+                print("Auto-imported {} new endpoints from sitemap in {:.2f}s total".format(
+                    len(new_endpoints), time.time() - start_time))
+                
+                # Show notification
+                self._show_status_feedback("Auto-imported {} new endpoints".format(len(new_endpoints)))
+            else:
+                print("DEBUG: No new endpoints found (check completed in {:.2f}s)".format(time.time() - start_time))
+                
+        except Exception as e:
+            print("Error checking sitemap updates: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+    
+    def _export_watch_list(self, event):
+        """Export watch list to a file"""
+        try:
+            if hasattr(self, '_watch_table_model') and self._watch_table_model.getRowCount() == 0:
+                self._show_status_feedback("No paths to export")
+                return
+            
+            # Open save dialog
+            file_chooser = JFileChooser()
+            file_chooser.setFileFilter(FileNameExtensionFilter("Text files (*.txt)", ["txt"]))
+            file_chooser.setFileFilter(FileNameExtensionFilter("JSON files (*.json)", ["json"]))
+            
+            result = file_chooser.showSaveDialog(None)
+            if result != JFileChooser.APPROVE_OPTION:
+                return
+            
+            selected_file = file_chooser.getSelectedFile()
+            file_path = selected_file.getAbsolutePath()
+            
+            # Prepare data
+            export_data = []
+            if hasattr(self, '_watch_table_model'):
+                # Export from table if available
+                for row in range(self._watch_table_model.getRowCount()):
+                    path = self._watch_table_model.getValueAt(row, 0)
+                    audited = self._watch_table_model.getValueAt(row, 1)
+                    date_added = self._watch_table_model.getValueAt(row, 2)
+                    
+                    if file_path.lower().endswith('.json'):
+                        export_data.append({
+                            'path': path,
+                            'audited': audited,
+                            'date_added': date_added
+                        })
+                    else:
+                        # Text format - just paths
+                        export_data.append(path)
+            else:
+                # Fallback - export empty list if no watch list data
+                export_data = []
+            
+            # Write file
+            with open(file_path, 'w') as f:
+                if file_path.lower().endswith('.json'):
+                    import json
+                    json.dump(export_data, f, indent=2)
+                else:
+                    f.write('\n'.join(export_data))
+            
+            self._show_status_feedback("Watch list exported to {}".format(selected_file.getName()))
+            
+        except Exception as e:
+            self._show_status_feedback("Error exporting file: {}".format(str(e)))
+            print("Export error: {}".format(str(e)))
+    
+    def _show_configuration_dialog(self, event):
+        """Show configuration dialog with all settings from data file"""
+        try:
+            from javax.swing import JDialog, JPanel, JLabel, JCheckBox, JButton, JTextArea, JScrollPane, JTabbedPane, JTextField, JComboBox, BorderFactory
+            from java.awt import BorderLayout, GridBagLayout, GridBagConstraints, Insets, Dimension
+            
+            # Load current data to get all settings
+            data = self._load_data_from_file()
+            settings = data.get("settings", {})
+            
+            # Create dialog
+            dialog = JDialog(None, "Vuln tracker Configuration", True)
+            dialog.setSize(900, 750)  # Made wider and taller
+            dialog.setLocationRelativeTo(None)
+            
+            main_panel = JPanel(BorderLayout())
+            
+            # Add status label at the top for in-dialog feedback
+            status_panel = JPanel()
+            status_panel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10))  # Add padding
+            dialog_status_label = JLabel(" ")  # Empty initially
+            dialog_status_label.setFont(dialog_status_label.getFont().deriveFont(12.0))
+            status_panel.add(dialog_status_label)
+            main_panel.add(status_panel, BorderLayout.NORTH)
+            
+            # Create tabbed pane for different config sections
+            config_tabs = JTabbedPane()
+            
+            # === AUTO-AUDIT SETTINGS TAB ===
+            auto_audit_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            gbc.insets = Insets(8, 8, 8, 8)  # Increased spacing
+            gbc.anchor = GridBagConstraints.WEST
+            gbc.weightx = 1.0  # Allow horizontal expansion
+            gbc.weighty = 0.0  # No vertical expansion initially
+            
+            # Title
+            gbc.gridx = 0
+            gbc.gridy = 0
+            gbc.gridwidth = 2
+            title_label = JLabel("Auto-Audit Settings")
+            title_label.setFont(title_label.getFont().deriveFont(16.0))
+            auto_audit_panel.add(title_label, gbc)
+            
+            # Description
+            gbc.gridy = 1
+            desc_label = JLabel("Configure automatic marking of paths as audited")
+            auto_audit_panel.add(desc_label, gbc)
+            
+            # Repeater checkbox
+            gbc.gridy = 2
+            gbc.gridwidth = 1
+            auto_audit_repeater_checkbox = JCheckBox("Auto-mark as audited when accessed from Repeater", self._auto_audit_repeater_enabled)
+            auto_audit_panel.add(auto_audit_repeater_checkbox, gbc)
+            
+            # Scanner checkbox
+            gbc.gridy = 3
+            auto_audit_scanner_checkbox = JCheckBox("Auto-mark as audited when accessed from Scanner", self._auto_audit_scanner_enabled)
+            auto_audit_panel.add(auto_audit_scanner_checkbox, gbc)
+            
+            config_tabs.addTab("Auto-Audit", auto_audit_panel)
+            
+            # === SITEMAP SETTINGS TAB ===
+            sitemap_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            gbc.insets = Insets(8, 8, 8, 8)  # Increased spacing
+            gbc.anchor = GridBagConstraints.WEST
+            gbc.weightx = 1.0  # Allow horizontal expansion
+            gbc.weighty = 0.0  # No vertical expansion for most components
+            
+            # Title
+            gbc.gridx = 0
+            gbc.gridy = 0
+            gbc.gridwidth = 2
+            sitemap_title = JLabel("Sitemap Import Configuration")
+            sitemap_title.setFont(sitemap_title.getFont().deriveFont(16.0))
+            sitemap_panel.add(sitemap_title, gbc)
+            
+            # Get current sitemap config or create default
+            sitemap_config = settings.get("sitemap_config", {})
+            
+            # Target selection
+            gbc.gridx = 0
+            gbc.gridy = 1
+            gbc.gridwidth = 1
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Target Host:"), gbc)
+            
+            # Get available targets from sitemap
+            available_targets = self._get_available_targets()
+            current_target = sitemap_config.get("target", "")
+            if current_target and current_target not in available_targets:
+                available_targets.append(current_target)
+            
+            target_combo = JComboBox(available_targets if available_targets else ["No targets found"])
+            if current_target:
+                target_combo.setSelectedItem(current_target)
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            sitemap_panel.add(target_combo, gbc)
+            
+            # Exclude extensions
+            gbc.gridx = 0
+            gbc.gridy = 2
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Exclude Extensions:"), gbc)
+            
+            current_extensions = ",".join(sitemap_config.get("exclude_extensions", ["js", "gif", "jpg", "css", "svg", "png", "woff", "pdf"]))
+            extensions_field = JTextField(current_extensions, 35)  # Made wider
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            sitemap_panel.add(extensions_field, gbc)
+            
+            # Exclude patterns
+            gbc.gridx = 0
+            gbc.gridy = 3
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Exclude Path Patterns:"), gbc)
+            
+            current_patterns = "\n".join(sitemap_config.get("exclude_patterns", ["*/admin/login/*", "*/logout", "*/static/*"]))
+            exclude_area = JTextArea(8, 35)  # Made much taller (8 rows instead of 5)
+            exclude_area.setText(current_patterns)
+            exclude_area.setLineWrap(False)  # Disable line wrapping for better readability
+            exclude_area.setWrapStyleWord(False)
+            exclude_scroll = JScrollPane(exclude_area)
+            exclude_scroll.setPreferredSize(Dimension(450, 180))  # Larger preferred size
+            exclude_scroll.setMinimumSize(Dimension(400, 120))    # Set minimum size
+            exclude_scroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED)
+            exclude_scroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS)
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.weighty = 1.0  # Allow vertical expansion for text area
+            gbc.fill = GridBagConstraints.BOTH
+            sitemap_panel.add(exclude_scroll, gbc)
+            
+            # Exclude status codes
+            gbc.gridx = 0
+            gbc.gridy = 4
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Exclude Status Codes:"), gbc)
+            
+            current_status_codes = ",".join(map(str, sitemap_config.get("exclude_status_codes", [101, 404, 500])))
+            status_field = JTextField(current_status_codes, 25)  # Made wider
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            sitemap_panel.add(status_field, gbc)
+            
+            # Exclude MIME types
+            gbc.gridx = 0
+            gbc.gridy = 5
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Exclude MIME Types:"), gbc)
+            
+            # Create MIME type checkboxes panel with control buttons
+            mime_container = JPanel(BorderLayout())
+            
+            # Top panel with Select All/None and preset buttons
+            mime_controls = JPanel()
+            select_all_btn = JButton("Select All")
+            select_none_btn = JButton("Select None")
+            assets_btn = JButton("Static Assets")  # images, css, js, fonts
+            api_btn = JButton("API Responses")     # json, xml
+            
+            mime_controls.add(select_all_btn)
+            mime_controls.add(Box.createHorizontalStrut(3))
+            mime_controls.add(select_none_btn)
+            mime_controls.add(Box.createHorizontalStrut(8))
+            mime_controls.add(JLabel("Presets:"))
+            mime_controls.add(Box.createHorizontalStrut(3))
+            mime_controls.add(assets_btn)
+            mime_controls.add(Box.createHorizontalStrut(3))
+            mime_controls.add(api_btn)
+            
+            mime_container.add(mime_controls, BorderLayout.NORTH)
+            
+            # Checkboxes panel
+            mime_panel = JPanel()
+            mime_panel.setLayout(BoxLayout(mime_panel, BoxLayout.X_AXIS))
+            
+            # Available MIME types with descriptions
+            mime_options = [
+                ("image", "Images (jpg, png, gif, etc.)"),
+                ("video", "Videos (mp4, avi, etc.)"),
+                ("sound", "Audio (mp3, wav, etc.)"),
+                ("font", "Fonts (woff, ttf, etc.)"),
+                ("css", "Stylesheets"),
+                ("script", "JavaScript"),
+                ("html", "HTML pages"),
+                ("json", "JSON responses"),
+                ("xml", "XML documents")
+            ]
+            
+            # Get currently selected MIME types
+            current_mime_types = sitemap_config.get("exclude_mime_types", ["image", "video", "sound", "font", "css", "script"])
+            
+            # Create checkboxes and store references
+            mime_checkboxes = {}
+            for mime_type, description in mime_options:
+                checkbox = JCheckBox(mime_type, mime_type in current_mime_types)
+                checkbox.setToolTipText(description)  # Show description on hover
+                mime_checkboxes[mime_type] = checkbox
+                mime_panel.add(checkbox)
+                mime_panel.add(Box.createHorizontalStrut(5))  # Small spacing
+            
+            mime_container.add(mime_panel, BorderLayout.CENTER)
+            
+            # Add action listeners for control buttons
+            def select_all_mime(e):
+                for checkbox in mime_checkboxes.values():
+                    checkbox.setSelected(True)
+            
+            def select_none_mime(e):
+                for checkbox in mime_checkboxes.values():
+                    checkbox.setSelected(False)
+            
+            def select_static_assets(e):
+                # Select typical static assets: images, css, scripts, fonts, videos, sounds
+                for checkbox in mime_checkboxes.values():
+                    checkbox.setSelected(False)  # Clear all first
+                static_types = ["image", "video", "sound", "font", "css", "script"]
+                for mime_type in static_types:
+                    if mime_type in mime_checkboxes:
+                        mime_checkboxes[mime_type].setSelected(True)
+            
+            def select_api_responses(e):
+                # Select API response types: json, xml
+                for checkbox in mime_checkboxes.values():
+                    checkbox.setSelected(False)  # Clear all first
+                api_types = ["json", "xml"]
+                for mime_type in api_types:
+                    if mime_type in mime_checkboxes:
+                        mime_checkboxes[mime_type].setSelected(True)
+            
+            select_all_btn.addActionListener(select_all_mime)
+            select_none_btn.addActionListener(select_none_mime)
+            assets_btn.addActionListener(select_static_assets)
+            api_btn.addActionListener(select_api_responses)
+            
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            sitemap_panel.add(mime_container, gbc)
+            
+            # Auto-update checkbox
+            gbc.gridx = 0
+            gbc.gridy = 6
+            gbc.gridwidth = 2
+            auto_update_checkbox = JCheckBox("Auto-update when sitemap changes", sitemap_config.get("auto_update", False))
+            sitemap_panel.add(auto_update_checkbox, gbc)
+            
+            # Monitoring frequency setting
+            gbc.gridx = 0
+            gbc.gridy = 7
+            gbc.gridwidth = 1
+            gbc.weightx = 0.0  # Label doesn't expand
+            gbc.fill = GridBagConstraints.NONE
+            sitemap_panel.add(JLabel("Monitoring Frequency:"), gbc)
+            
+            frequency_options = ["Fast (5 seconds)", "Normal (10 seconds)", "Slow (30 seconds)"]
+            current_frequency = sitemap_config.get("monitor_frequency", 5)  # Default to 5 seconds
+            if current_frequency <= 5:
+                selected_freq = 0
+            elif current_frequency <= 10:
+                selected_freq = 1
+            else:
+                selected_freq = 2
+                
+            frequency_combo = JComboBox(frequency_options)
+            frequency_combo.setSelectedIndex(selected_freq)
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            sitemap_panel.add(frequency_combo, gbc)
+            
+            # Instructions
+            gbc.gridy = 8
+            gbc.gridwidth = 2
+            instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'. Fast monitoring uses more CPU but detects changes quicker")
+            sitemap_panel.add(instructions, gbc)
+            
+            # Action buttons for sitemap
+            gbc.gridy = 9
+            gbc.gridwidth = 1
+            gbc.fill = GridBagConstraints.NONE
+            
+            sitemap_button_panel = JPanel()
+            
+            # Update sitemap config button
+            update_sitemap_btn = JButton("Update Sitemap Config")
+            def update_sitemap_config(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    selected_target = str(target_combo.getSelectedItem()) if target_combo.getSelectedItem() else ""
+                    if not selected_target or selected_target == "No targets found":
+                        dialog_status_label.setText("❌ Please select a valid target")
+                        return
+                    
+                    # Parse and validate extensions
+                    extensions_text = extensions_field.getText().strip()
+                    exclude_extensions = []
+                    if extensions_text:
+                        exclude_extensions = [ext.strip().lower() for ext in extensions_text.split(",") if ext.strip()]
+                    
+                    # Parse and validate patterns - preserve exact user input
+                    patterns_text = exclude_area.getText().strip()
+                    exclude_patterns = []
+                    if patterns_text:
+                        # Split by lines and preserve non-empty patterns exactly as entered
+                        exclude_patterns = [pattern.strip() for pattern in patterns_text.split("\n") if pattern.strip()]
+                    
+                    # Parse and validate status codes
+                    status_text = status_field.getText().strip()
+                    exclude_status_codes = []
+                    if status_text:
+                        for code in status_text.split(","):
+                            code = code.strip()
+                            if code.isdigit():
+                                exclude_status_codes.append(int(code))
+                    
+                    # Parse and validate MIME types from checkboxes
+                    exclude_mime_types = []
+                    for mime_type, checkbox in mime_checkboxes.items():
+                        if checkbox.isSelected():
+                            exclude_mime_types.append(mime_type)
+                    
+                    # Get monitoring frequency
+                    freq_index = frequency_combo.getSelectedIndex()
+                    if freq_index == 0:
+                        monitor_frequency = 5  # Fast
+                    elif freq_index == 1:
+                        monitor_frequency = 10  # Normal
+                    else:
+                        monitor_frequency = 30  # Slow
+                    
+                    print("DEBUG: Updating sitemap config with:")
+                    print("  Target: {}".format(selected_target))
+                    print("  Extensions: {}".format(exclude_extensions))
+                    print("  Patterns: {}".format(exclude_patterns))
+                    print("  Status codes: {}".format(exclude_status_codes))
+                    print("  MIME types: {}".format(exclude_mime_types))
+                    print("  Auto-update: {}".format(auto_update_checkbox.isSelected()))
+                    print("  Monitor frequency: {} seconds".format(monitor_frequency))
+                    
+                    new_config = {
+                        "target": selected_target,
+                        "exclude_extensions": exclude_extensions,
+                        "exclude_patterns": exclude_patterns,
+                        "exclude_status_codes": exclude_status_codes,
+                        "exclude_mime_types": exclude_mime_types,
+                        "auto_update": auto_update_checkbox.isSelected(),
+                        "monitor_frequency": monitor_frequency
+                    }
+                    
+                    # Update sitemap config in memory
+                    self._sitemap_config = new_config
+                    
+                    # Load current data and update settings
+                    data = self._load_data_from_file()
+                    if "settings" not in data:
+                        data["settings"] = {}
+                    
+                    # Save the configuration exactly as entered
+                    data["settings"]["sitemap_config"] = new_config
+                    self._save_data_to_file(data)
+                    
+                    # Update cached data to stay in sync
+                    self._data = data
+                    
+                    print("DEBUG: Sitemap config saved to data file")
+                    
+                    # Handle auto-update monitoring
+                    if new_config.get("auto_update", False):
+                        self._start_sitemap_monitoring()
+                        dialog_status_label.setText("Sitemap configuration updated successfully (auto-update enabled)")
+                    else:
+                        self._stop_sitemap_monitoring()
+                        dialog_status_label.setText("Sitemap configuration updated successfully")
+                    
+                    # Verify the save worked by reloading
+                    verify_data = self._load_data_from_file()
+                    saved_config = verify_data.get("settings", {}).get("sitemap_config", {})
+                    print("DEBUG: Verified saved patterns: {}".format(saved_config.get("exclude_patterns", [])))
+                    
+                except Exception as ex:
+                    error_msg = "Error updating sitemap config: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    import traceback
+                    traceback.print_exc()
+                    dialog_status_label.setText("❌ {}".format(error_msg))
+            
+            update_sitemap_btn.addActionListener(update_sitemap_config)
+            sitemap_button_panel.add(update_sitemap_btn)
+            
+            # Clear sitemap config button
+            clear_sitemap_btn = JButton("Clear Configuration")
+            def clear_sitemap_config(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    # Clear sitemap config
+                    self._sitemap_config = None
+                    self._stop_sitemap_monitoring()
+                    
+                    # Update data file
+                    data = self._load_data_from_file()
+                    if "settings" in data and "sitemap_config" in data["settings"]:
+                        del data["settings"]["sitemap_config"]
+                    self._save_data_to_file(data)
+                    
+                    # Update cached data to stay in sync
+                    self._data = data
+                    
+                    # Reset form fields
+                    target_combo.setSelectedIndex(0)
+                    extensions_field.setText("js,gif,jpg,css,svg,png,woff,pdf")
+                    exclude_area.setText("*/admin/login/*\n*/logout\n*/static/*")
+                    status_field.setText("101,404,500")
+                    auto_update_checkbox.setSelected(False)
+                    frequency_combo.setSelectedIndex(0)  # Reset to Fast
+                    
+                    dialog_status_label.setText("✅ Sitemap configuration cleared")
+                    
+                except Exception as ex:
+                    error_msg = "Error clearing sitemap config: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    dialog_status_label.setText("❌ {}".format(error_msg))
+            
+            clear_sitemap_btn.addActionListener(clear_sitemap_config)
+            sitemap_button_panel.add(clear_sitemap_btn)
+            
+            gbc.gridx = 0
+            gbc.gridwidth = 2
+            sitemap_panel.add(sitemap_button_panel, gbc)
+            
+            config_tabs.addTab("Sitemap", sitemap_panel)
+            
+            # === PROJECT SETTINGS TAB ===
+            project_panel = JPanel(GridBagLayout())
+            gbc = GridBagConstraints()
+            gbc.insets = Insets(8, 8, 8, 8)  # Increased spacing
+            gbc.anchor = GridBagConstraints.WEST
+            gbc.weightx = 1.0  # Allow horizontal expansion
+            gbc.weighty = 0.0  # No vertical expansion initially
+            
+            # Title
+            gbc.gridx = 0
+            gbc.gridy = 0
+            gbc.gridwidth = 2
+            project_title = JLabel("Project Information")
+            project_title.setFont(project_title.getFont().deriveFont(16.0))
+            project_panel.add(project_title, gbc)
+            
+            # Project details
+            gbc.gridy = 1
+            gbc.gridwidth = 1
+            gbc.weightx = 0.0  # Label doesn't expand
+            project_panel.add(JLabel("Current Project:"), gbc)
+            
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            project_name_field = JTextField(self._current_project_name, 25)  # Made wider
+            project_name_field.setEditable(False)
+            project_panel.add(project_name_field, gbc)
+            
+            gbc.gridx = 0
+            gbc.gridy = 2
+            gbc.weightx = 0.0  # Label doesn't expand
+            project_panel.add(JLabel("Data File:"), gbc)
+            
+            gbc.gridx = 1
+            gbc.weightx = 1.0  # Allow expansion
+            data_file_field = JTextField(self._data_file_path, 40)  # Made wider
+            data_file_field.setEditable(False)
+            project_panel.add(data_file_field, gbc)
+            
+            # Statistics
+            gbc.gridx = 0
+            gbc.gridy = 3
+            gbc.gridwidth = 2
+            stats_text = "\nStatistics:\n"
+            stats_text += "Watch List Paths: {}\n".format(len(data.get("watch_list_audit", [])))
+            stats_text += "Vulnerabilities: {}\n".format(len(data.get("vulnerabilities", {})))
+            stats_text += "Vulnerability Counter: {}\n".format(data.get("vuln_counter", 0))
+            
+            stats_label = JLabel(stats_text.replace("\n", " | "))
+            stats_label.setFont(stats_label.getFont().deriveFont(10.0))
+            project_panel.add(stats_label, gbc)
+            
+            config_tabs.addTab("Project", project_panel)
+            
+            main_panel.add(config_tabs, BorderLayout.CENTER)
+            
+            # Button panel with padding
+            button_panel = JPanel()
+            button_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))  # Add padding
+            
+            # Apply Auto-Audit Settings button
+            apply_btn = JButton("Apply Auto-Audit Settings")
+            def apply_settings(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    # Update auto-audit settings
+                    self._auto_audit_repeater_enabled = auto_audit_repeater_checkbox.isSelected()
+                    self._auto_audit_scanner_enabled = auto_audit_scanner_checkbox.isSelected()
+                    
+                    # Save settings to data file
+                    data = self._load_data_from_file()
+                    if "settings" not in data:
+                        data["settings"] = {}
+                    
+                    data["settings"]["auto_audit_repeater_enabled"] = self._auto_audit_repeater_enabled
+                    data["settings"]["auto_audit_scanner_enabled"] = self._auto_audit_scanner_enabled
+                    
+                    self._save_data_to_file(data)
+                    
+                    # Update cached data to stay in sync
+                    self._data = data
+                    
+                    dialog_status_label.setText("Auto-audit settings applied successfully")
+                    
+                except Exception as ex:
+                    error_msg = "Error applying settings: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    dialog_status_label.setText("❌ {}".format(error_msg))
+            
+            apply_btn.addActionListener(apply_settings)
+            button_panel.add(apply_btn)
+            
+            # Import New Sitemap Config button
+            import_btn = JButton("Import New Sitemap Config")
+            def import_new_sitemap(e):
+                try:
+                    dialog.dispose()
+                    # Call the sitemap import dialog
+                    self._import_from_sitemap(None)
+                    
+                except Exception as ex:
+                    print("Error launching sitemap import: {}".format(str(ex)))
+            
+            import_btn.addActionListener(import_new_sitemap)
+            button_panel.add(import_btn)
+            
+            # Close button
+            close_btn = JButton("Close")
+            close_btn.addActionListener(lambda e: dialog.dispose())
+            button_panel.add(close_btn)
+            
+            main_panel.add(button_panel, BorderLayout.SOUTH)
+            
+            dialog.add(main_panel)
+            dialog.setVisible(True)
+            
+        except Exception as e:
+            print("Error showing configuration dialog: {}".format(str(e)))
+            self._show_status_feedback("Error opening configuration: {}".format(str(e)))
+    
+    def _on_audit_status_changed(self, event):
+        """Handle changes to audit status in the table"""
+        try:
+            # Don't save if we're currently updating the GUI (prevents overwriting during project switches)
+            if hasattr(self, '_is_updating_gui') and self._is_updating_gui:
+                print("Skipping save during GUI update to prevent data overwrite")
+                return
+            
+            # Save the updated data
+            self._save_watch_list_data()
+            
+            # Update status using the centralized method
+            self._update_audit_status_display()
+            
+        except Exception as e:
+            print("Error saving audit status: {}".format(str(e)))
+    
+    def _add_single_path(self, event):
+        """Add a single path via dialog"""
+        try:
+            # Get path from user
+            path = JOptionPane.showInputDialog(
+                None,
+                "Enter path/URL to add to watch list:",
+                "Add Path",
+                JOptionPane.PLAIN_MESSAGE
+            )
+            
+            if not path or not path.strip():
+                return
+            
+            path = path.strip()
+            
+            # Check for duplicates in table
+            if hasattr(self, '_watch_table_model'):
+                for row in range(self._watch_table_model.getRowCount()):
+                    if self._watch_table_model.getValueAt(row, 0) == path:
+                        self._show_status_feedback("Path already exists in watch list")
+                        return
+                
+                # Add to table
+                row_data = [path, False, False, "Never", False]  # Added False for highlight column
+                self._watch_table_model.addRow(row_data)
+                
+                # Sync to text area
+                self._sync_table_to_text()
+                
+                # Save data
+                self._save_watch_list_data()
+                
+                # Update status
+                total_paths = self._watch_table_model.getRowCount()
+                self._status_label.setText("Ready - {} paths in watch list".format(total_paths))
+                
+                # Update progress display
+                self._update_audit_status_display()
+                
+                self._show_status_feedback("Path added successfully")
+            
+        except Exception as e:
+            self._show_status_feedback("Error adding path: {}".format(str(e)))
+            print("Add path error: {}".format(str(e)))
+    
+    def _remove_selected_path(self, event):
+        """Remove the selected path from the table"""
+        try:
+            if not hasattr(self, '_watch_table'):
+                return
+                
+            selected_row = self._watch_table.getSelectedRow()
+            if selected_row == -1:
+                self._show_status_feedback("Please select a path to remove")
+                return
+            
+            # Get path for confirmation
+            path = self._watch_table_model.getValueAt(selected_row, 0)
+            
+            # Confirm removal
+            result = JOptionPane.showConfirmDialog(
+                None,
+                "Remove path: {}?".format(path),
+                "Confirm Removal",
+                JOptionPane.YES_NO_OPTION
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                self._watch_table_model.removeRow(selected_row)
+                
+                # Sync to text area
+                self._sync_table_to_text()
+                
+                # Save data
+                self._save_watch_list_data()
+                
+                # Update status
+                total_paths = self._watch_table_model.getRowCount()
+                self._status_label.setText("Ready - {} paths in watch list".format(total_paths))
+                
+                # Update progress display
+                self._update_audit_status_display()
+                
+                self._show_status_feedback("Path removed successfully")
+            
+        except Exception as e:
+            self._show_status_feedback("Error removing path: {}".format(str(e)))
+            print("Remove path error: {}".format(str(e)))
+    
+    def _mark_all_audited(self, event):
+        """Mark all paths as audited"""
+        try:
+            if not hasattr(self, '_watch_table_model') or self._watch_table_model.getRowCount() == 0:
+                self._show_status_feedback("No paths to mark")
+                return
+            
+            # Confirm action
+            result = JOptionPane.showConfirmDialog(
+                None,
+                "Mark all {} paths as audited?".format(self._watch_table_model.getRowCount()),
+                "Confirm Mark All",
+                JOptionPane.YES_NO_OPTION
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # Mark all as audited
+                for row in range(self._watch_table_model.getRowCount()):
+                    self._watch_table_model.setValueAt(True, row, 1)  # Audited column
+                
+                # Save data
+                self._save_watch_list_data()
+                
+                # Update status
+                total_paths = self._watch_table_model.getRowCount()
+                self._status_label.setText("Ready - {} paths ({} audited, 0 pending)".format(total_paths, total_paths))
+                
+                self._show_status_feedback("All paths marked as audited")
+            
+        except Exception as e:
+            self._show_status_feedback("Error marking paths: {}".format(str(e)))
+            print("Mark all error: {}".format(str(e)))
+    
+    def _clear_all_from_table(self, event):
+        """Clear all paths from table view"""
+        try:
+            if not hasattr(self, '_watch_table_model') or self._watch_table_model.getRowCount() == 0:
+                self._show_status_feedback("Watch list is already empty")
+                return
+            
+            # Confirm clearing
+            result = JOptionPane.showConfirmDialog(
+                None,
+                "Clear all {} paths from watch list?".format(self._watch_table_model.getRowCount()),
+                "Confirm Clear All",
+                JOptionPane.YES_NO_OPTION
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # Clear table
+                self._watch_table_model.setRowCount(0)
+                
+                # Clear text area
+                if hasattr(self, '_path_textarea'):
+                    self._path_textarea.setText("")
+                
+                # Save empty data
+                self._save_watch_list_data()
+                
+                # Update status
+                self._status_label.setText("Ready - 0 paths in watch list")
+                
+                # Update progress display
+                self._update_audit_status_display()
+                
+                self._show_status_feedback("Watch list cleared")
+            
+        except Exception as e:
+            self._show_status_feedback("Error clearing paths: {}".format(str(e)))
+            print("Clear error: {}".format(str(e)))
+    
+    def _sync_table_to_text(self):
+        """Sync table data to text area"""
+        try:
+            if hasattr(self, '_watch_table_model') and hasattr(self, '_path_textarea'):
+                paths = []
+                for row in range(self._watch_table_model.getRowCount()):
+                    path = self._watch_table_model.getValueAt(row, 0)
+                    paths.append(path)
+                
+                self._path_textarea.setText('\n'.join(paths))
+            
+        except Exception as e:
+            print("Error syncing table to text: {}".format(str(e)))
+    
+    def _sync_text_to_table(self):
+        """Sync text area data to table"""
+        try:
+            if not hasattr(self, '_watch_table_model') or not hasattr(self, '_path_textarea'):
+                return
+                
+            # Get paths from text area
+            text_content = self._path_textarea.getText().strip()
+            if not text_content:
+                return
+            
+            new_paths = [line.strip() for line in text_content.split('\n') if line.strip()]
+            
+            # Get existing paths from table
+            existing_data = {}
+            for row in range(self._watch_table_model.getRowCount()):
+                path = self._watch_table_model.getValueAt(row, 0)
+                manual_audited = self._watch_table_model.getValueAt(row, 1)
+                scanned = self._watch_table_model.getValueAt(row, 2)
+                last_audit = self._watch_table_model.getValueAt(row, 3)
+                highlight = self._watch_table_model.getValueAt(row, 4)
+                existing_data[path] = (manual_audited, scanned, last_audit, highlight)
+            
+            # Clear table
+            self._watch_table_model.setRowCount(0)
+            
+            # Re-add paths, preserving audit status and dates
+            for path in new_paths:
+                if path in existing_data:
+                    # Preserve existing data
+                    manual_audited, scanned, last_audit, highlight = existing_data[path]
+                    row_data = [path, manual_audited, scanned, last_audit, highlight]
+                else:
+                    # New path
+                    row_data = [path, False, False, "Never", False]
+                
+                self._watch_table_model.addRow(row_data)
+            
+        except Exception as e:
+            print("Error syncing text to table: {}".format(str(e)))
+    
+    def _save_watch_list_data(self):
+        """Save watch list data including audit status"""
+        try:
+            if not hasattr(self, '_current_project_name') or not self._current_project_name:
+                print("No current project to save watch list data")
+                return
+            
+            # Prepare data to save
+            watch_data = []
+            if hasattr(self, '_watch_table_model'):
+                for row in range(self._watch_table_model.getRowCount()):
+                    path = self._watch_table_model.getValueAt(row, 0)
+                    manual_audited = self._watch_table_model.getValueAt(row, 1)
+                    scanned = self._watch_table_model.getValueAt(row, 2)
+                    last_audit = self._watch_table_model.getValueAt(row, 3)
+                    highlight = self._watch_table_model.getValueAt(row, 4)
+                    
+                    watch_data.append({
+                        'path': path,
+                        'manual_audited': manual_audited,
+                        'scanned': scanned,
+                        'last_audit': last_audit,
+                        'highlight': highlight
+                    })
+            
+            # Save to current project data
+            if hasattr(self, '_data'):
+                self._data['watch_list_audit'] = watch_data
+                
+                # Save to file using the correct method
+                self._save_data_to_file(self._data)
+                print("Saved {} watch list items with audit status".format(len(watch_data)))
+            
+        except Exception as e:
+            print("Error saving watch list data: {}".format(str(e)))
+    
+    def getTabCaption(self):
+        """Return the text to be displayed on the tab"""
+        return "Vuln tracker"
+    
+    def getUiComponent(self):
+        """Return the component to be used as the contents of our tab"""
+        return self._main_panel
+    
+    def createNewInstance(self, controller, editable):
+        """Create a new instance of our custom message editor tab"""
+        return CWEMessageEditorTab(self, controller, editable)
+    
+    def processHttpMessage(self, toolFlag, messageIsRequest, messageInfo):
+        """Process HTTP messages and highlight matching requests"""
+        # Only process requests (not responses)
+        if not messageIsRequest:
+            return
+        
+        # Get the request details
+        try:
+            request = messageInfo.getRequest()
+            if request is None:
+                return
+                
+            request_info = self._helpers.analyzeRequest(messageInfo)
+            url = request_info.getUrl()
+            
+            if url is None:
+                return
+                
+            path = url.getPath()
+            full_url = str(url)
+            
+            # Check if this request matches any of our paths
+            if self._matches_watchlist(path, full_url):
+                # Check if highlighting is enabled for matching paths
+                if toolFlag in [self._callbacks.TOOL_PROXY, self._callbacks.TOOL_SPIDER, self._callbacks.TOOL_SCANNER]:
+                    if self._should_highlight_path(path, full_url):
+                        messageInfo.setHighlight("red")
+                        messageInfo.setComment("Request found")
+                        print("Highlighted request: {}".format(full_url))
+                
+                # Auto-mark as audited if request comes from Repeater
+                if toolFlag == self._callbacks.TOOL_REPEATER and self._auto_audit_repeater_enabled:
+                    self._auto_mark_as_audited(path, full_url, "Repeater")
+                    print("Auto-marked as audited (Repeater): {}".format(full_url))
+                
+                # Auto-mark as audited if request comes from Scanner
+                if toolFlag == self._callbacks.TOOL_SCANNER and self._auto_audit_scanner_enabled:
+                    self._auto_mark_as_audited(path, full_url, "Scanner")
+                    print("Auto-marked as audited (Scanner): {}".format(full_url))
+                
+        except Exception as e:
+            print("Error processing HTTP message: {}".format(str(e)))
+    
+    def _auto_mark_as_audited(self, path, full_url, source_tool="Repeater"):
+        """Automatically mark matching paths as audited when accessed from specified tool"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return
+            
+            # Find matching paths in the table and mark them as audited
+            marked_count = 0
+            for row in range(self._watch_table_model.getRowCount()):
+                table_path = self._watch_table_model.getValueAt(row, 0)
+                
+                # Check if this table entry matches the current request
+                if self._is_match(table_path, path, full_url):
+                    # Determine which column to update based on source tool
+                    marked_this_path = False
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    
+                    if source_tool == "Repeater":
+                        # Check if not already manually audited
+                        current_manual_audited = self._watch_table_model.getValueAt(row, 1)
+                        if not current_manual_audited:
+                            # Mark as manually audited (column 1)
+                            self._watch_table_model.setValueAt(True, row, 1)
+                            # Update last audit time (column 3)
+                            self._watch_table_model.setValueAt(current_time, row, 3)
+                            marked_this_path = True
+                            print("Auto-marked path as manually audited ({}): {}".format(source_tool, table_path))
+                    
+                    elif source_tool == "Scanner":
+                        # Check if not already scanned
+                        current_scanned = self._watch_table_model.getValueAt(row, 2)
+                        if not current_scanned:
+                            # Mark as scanned (column 2)
+                            self._watch_table_model.setValueAt(True, row, 2)
+                            # Update last audit time (column 3)
+                            self._watch_table_model.setValueAt(current_time, row, 3)
+                            marked_this_path = True
+                            print("Auto-marked path as scanned ({}): {}".format(source_tool, table_path))
+                    
+                    if marked_this_path:
+                        marked_count += 1
+            
+            if marked_count > 0:
+                # Save the updated audit data
+                self._save_watch_list_data()
+                
+                # Update status display
+                self._update_audit_status_display()
+                
+                # Show brief visual feedback
+                self._show_auto_audit_feedback(marked_count, source_tool)
+            
+        except Exception as e:
+            print("Error auto-marking as audited: {}".format(str(e)))
+    
+    def _update_audit_status_display(self):
+        """Update the status label with current audit counts"""
+        try:
+            if hasattr(self, '_watch_table_model') and hasattr(self, '_status_label'):
+                total_paths = self._watch_table_model.getRowCount()
+                manual_audited_count = 0
+                scanned_count = 0
+                
+                for row in range(total_paths):
+                    if self._watch_table_model.getValueAt(row, 1):  # Manual Audited column
+                        manual_audited_count += 1
+                    if self._watch_table_model.getValueAt(row, 2):  # Scanned column
+                        scanned_count += 1
+                
+                # Calculate how many paths have any kind of audit
+                audited_paths = set()
+                for row in range(total_paths):
+                    if self._watch_table_model.getValueAt(row, 1) or self._watch_table_model.getValueAt(row, 2):
+                        audited_paths.add(row)
+                
+                audited_count = len(audited_paths)
+                pending_count = total_paths - audited_count
+                
+                # Update status label
+                self._status_label.setText("Ready - {} paths ({} manual, {} scanned, {} pending)".format(
+                    total_paths, manual_audited_count, scanned_count, pending_count))
+                
+                # Update progress bar
+                if hasattr(self, '_progress_bar') and hasattr(self, '_progress_details'):
+                    if total_paths > 0:
+                        progress_percentage = int((audited_count * 100) / total_paths)
+                        self._progress_bar.setValue(progress_percentage)
+                        self._progress_bar.setString("{}%".format(progress_percentage))
+                        self._progress_details.setText("({}/{} audited)".format(audited_count, total_paths))
+                    else:
+                        self._progress_bar.setValue(0)
+                        self._progress_bar.setString("0%")
+                        self._progress_details.setText("(0/0 audited)")
+                
+        except Exception as e:
+            print("Error updating audit status display: {}".format(str(e)))
+    
+    def _show_auto_audit_feedback(self, count, source_tool="Repeater"):
+        """Show brief feedback when paths are auto-marked as audited"""
+        try:
+            if hasattr(self, '_status_label'):
+                original_text = self._status_label.getText()
+                
+                # Show temporary feedback
+                feedback_text = "✓ Auto-marked {} path{} as audited ({})".format(
+                    count, "s" if count > 1 else "", source_tool)
+                self._status_label.setText(feedback_text)
+                
+                # Restore original text after 3 seconds
+                from javax.swing import Timer
+                from java.awt.event import ActionListener
+                
+                class RestoreAction(ActionListener):
+                    def actionPerformed(self, event):
+                        if hasattr(self.extension_parent, '_status_label'):
+                            self.extension_parent._update_audit_status_display()
+                        event.getSource().stop()
+                    
+                    def __init__(self, extension_parent):
+                        self.extension_parent = extension_parent
+                
+                timer = Timer(3000, RestoreAction(self))
+                timer.start()
+                
+        except Exception as e:
+            print("Error showing auto-audit feedback: {}".format(str(e)))
+    
+    def _should_highlight_path(self, path, full_url):
+        """Check if this path should be highlighted based on highlight column setting"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return False
+            
+            # Check each row in the table to see if highlighting is enabled for matching paths
+            for row in range(self._watch_table_model.getRowCount()):
+                table_path = self._watch_table_model.getValueAt(row, 0)
+                highlight_enabled = self._watch_table_model.getValueAt(row, 4)  # Highlight column
+                
+                # Check if this table entry matches the current request and highlighting is enabled
+                if highlight_enabled and self._is_match(table_path, path, full_url):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print("Error checking highlight status: {}".format(str(e)))
+            return False
+    
+    def _matches_watchlist(self, path, full_url):
+        """Check if the path/URL matches any item in our watch list"""
+        if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+            for item in self._data['watch_list_audit']:
+                watch_path = item.get('path', '') if isinstance(item, dict) else str(item)
+                if self._is_match(watch_path, path, full_url):
+                    return True
+        return False
+    
+    def _is_match(self, pattern, path, full_url):
+        """Check if a pattern matches the given path or URL"""
+        try:
+            # Convert wildcard pattern to regex
+            regex_pattern = pattern.replace('*', '.*')
+            regex_pattern = '^' + regex_pattern + '$'
+            
+            # Check against both path and full URL
+            if re.match(regex_pattern, path, re.IGNORECASE) or re.match(regex_pattern, full_url, re.IGNORECASE):
+                return True
+                
+            # Also check simple substring matching for convenience
+            if pattern.lower() in path.lower() or pattern.lower() in full_url.lower():
+                return True
+                
+        except Exception as e:
+            print("Error matching pattern '{}': {}".format(pattern, str(e)))
+        
+        return False
+    
+    def createMenuItems(self, invocation):
+        """Create context menu items"""
+        menu_items = []
+        
+        # Only show menu for requests in the repeater, target site map or proxy history
+        context = invocation.getInvocationContext()
+        if context in [invocation.CONTEXT_TARGET_SITE_MAP_TABLE, 
+                      invocation.CONTEXT_PROXY_HISTORY,
+                      invocation.CONTEXT_MESSAGE_EDITOR_REQUEST,
+                      invocation.CONTEXT_MESSAGE_VIEWER_REQUEST]:
+            
+            # Get selected messages
+            messages = invocation.getSelectedMessages()
+            if messages and len(messages) > 0:
+                # Add path to watch list
+                menu_item1 = JMenuItem("Add path to watch list", 
+                                    actionPerformed=lambda event: self._add_path_from_context(messages[0]))
+                menu_items.append(menu_item1)
+                
+                # Mark as vulnerable - create submenu for CWE types
+                cwe_menu = JMenuItem("Mark as Vulnerable")
+                menu_items.append(cwe_menu)
+                
+                # Add individual CWE options
+                for cwe_code, description in self._cwe_types.items():
+                    cwe_item = JMenuItem("{} - {}".format(cwe_code, description),
+                                       actionPerformed=lambda event, code=cwe_code, desc=description: 
+                                       self._mark_vulnerable(messages[0], code, desc))
+                    menu_items.append(cwe_item)
+        
+        return menu_items
+    
+    def _add_path_from_context(self, message):
+        """Add a path to the watch list from context menu"""
+        try:
+            request_info = self._helpers.analyzeRequest(message)
+            url = request_info.getUrl()
+            path = url.getPath()
+            
+            # Use SwingUtilities to ensure UI updates happen on Event Dispatch Thread
+            def update_ui():
+                try:
+                    # Add to text area
+                    current_text = self._path_textarea.getText()
+                    if current_text:
+                        new_text = current_text + '\n' + path
+                    else:
+                        new_text = path
+                    
+                    self._path_textarea.setText(new_text)
+                    self._update_paths(None)
+                    
+                    # Visual feedback instead of dialog
+                    self._highlight_tab_success()
+                    
+                except Exception as e:
+                    print("Error in UI update: {}".format(str(e)))
+            
+            SwingUtilities.invokeLater(update_ui)
+            
+        except Exception as e:
+            print("Error adding path from context: {}".format(str(e)))
+    
+    def _mark_vulnerable(self, message, cwe_code, description):
+        """Mark a request as vulnerable with specified CWE"""
+        try:
+            request_info = self._helpers.analyzeRequest(message)
+            url = request_info.getUrl()
+            method = request_info.getMethod()
+            
+            # Create hash for this request (for grouping purposes - ignoring query params)
+            request_hash = self._create_request_hash(url, method)
+            
+            # Check if this exact CWE already exists for this request
+            with self._vuln_lock:
+                # Check for duplicate CWE on same request
+                for vuln_id, vuln in self._vulnerabilities.items():
+                    if (vuln['request_hash'] == request_hash and 
+                        vuln['cwe'] == cwe_code):
+                        # Show message that this CWE already exists
+                        SwingUtilities.invokeLater(lambda: JOptionPane.showMessageDialog(
+                            self._main_panel,
+                            "This request is already marked as vulnerable to {}\n{} {}".format(
+                                cwe_code, method, url),
+                            "Duplicate Vulnerability",
+                            JOptionPane.WARNING_MESSAGE
+                        ))
+                        return
+                
+                # Create unique vulnerability ID
+                self._vuln_counter += 1
+                vuln_id = self._vuln_counter
+                
+                # Store vulnerability with unique ID
+                self._vulnerabilities[vuln_id] = {
+                    'cwe': cwe_code,
+                    'description': description,
+                    'url': str(url),
+                    'method': method,
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'request_hash': request_hash,
+                    'message': message  # Store reference for later use
+                }
+                
+                # Save to JSON file
+                self._save_vulnerability_to_database(vuln_id, self._vulnerabilities[vuln_id])
+            
+            # Update vulnerability table
+            self._refresh_vulnerability_table()
+            
+            # Switch to vulnerabilities tab
+            self._tabbed_pane.setSelectedIndex(1)
+            
+            # Count total vulnerabilities for this request
+            vuln_count = sum(1 for v in self._vulnerabilities.values() if v['request_hash'] == request_hash)
+            
+            # Visual feedback instead of dialog
+            self._highlight_tab_success()
+            
+            print("Marked vulnerability: {} {} - {} {} (Total for this request: {})".format(
+                method, url, cwe_code, description, vuln_count))
+            
+        except Exception as e:
+            print("Error marking vulnerability: {}".format(str(e)))
+    
+    def _refresh_vulnerability_table(self):
+        """Refresh the vulnerability table with current data"""
+        try:
+            # Clear existing rows
+            self._vuln_table_model.setRowCount(0)
+            
+            # Get current filter
+            selected_filter = str(self._cwe_filter.getSelectedItem())
+            filter_cwe = None
+            if selected_filter != "All Vulnerabilities":
+                filter_cwe = selected_filter.split(" - ")[0]
+            
+            # Add vulnerabilities to table
+            with self._vuln_lock:
+                for vuln_id, vuln in self._vulnerabilities.items():
+                    # Apply filter
+                    if filter_cwe and vuln['cwe'] != filter_cwe:
+                        continue
+                    
+                    row_data = [
+                        vuln['cwe'],
+                        vuln['description'],
+                        vuln['method'],
+                        vuln['url'],
+                        vuln['timestamp'],
+                        "Remove"
+                    ]
+                    self._vuln_table_model.addRow(row_data)
+            
+            # Update stats - show unique requests and total vulnerabilities
+            total_count = len(self._vulnerabilities)
+            displayed_count = self._vuln_table_model.getRowCount()
+            unique_requests = len(set(v['request_hash'] for v in self._vulnerabilities.values()))
+            
+            if filter_cwe:
+                self._vuln_stats_label.setText("Showing {} of {} vulnerabilities (filtered by {}) | {} unique requests".format(
+                    displayed_count, total_count, filter_cwe, unique_requests))
+            else:
+                self._vuln_stats_label.setText("Total: {} vulnerabilities across {} unique requests".format(
+                    total_count, unique_requests))
+                
+        except Exception as e:
+            print("Error refreshing vulnerability table: {}".format(str(e)))
+    
+    def _filter_vulnerabilities(self):
+        """Filter vulnerabilities based on selected CWE type"""
+        self._refresh_vulnerability_table()
+    
+    def _remove_vulnerability_at_row(self, row):
+        """Remove vulnerability at specified table row"""
+        try:
+            if row < 0 or row >= self._vuln_table_model.getRowCount():
+                return
+            
+            # Get vulnerability details from table
+            cwe = str(self._vuln_table_model.getValueAt(row, 0))
+            url = str(self._vuln_table_model.getValueAt(row, 3))
+            method = str(self._vuln_table_model.getValueAt(row, 2))
+            timestamp = str(self._vuln_table_model.getValueAt(row, 4))
+            
+            # Find and remove the corresponding vulnerability
+            with self._vuln_lock:
+                vuln_to_remove = None
+                for vuln_id, vuln in self._vulnerabilities.items():
+                    if (vuln['cwe'] == cwe and 
+                        vuln['url'] == url and 
+                        vuln['method'] == method and
+                        vuln['timestamp'] == timestamp):
+                        vuln_to_remove = vuln_id
+                        break
+                
+                if vuln_to_remove is not None:
+                    del self._vulnerabilities[vuln_to_remove]
+                    # Remove from database
+                    self._remove_vulnerability_from_database(vuln_to_remove)
+                    print("Removed vulnerability: {} {} - {}".format(method, url, cwe))
+            
+            # Refresh table
+            self._refresh_vulnerability_table()
+            
+        except Exception as e:
+            print("Error removing vulnerability: {}".format(str(e)))
+    
+    def _clear_vulnerabilities(self, event):
+        """Clear all tracked vulnerabilities"""
+        result = JOptionPane.showConfirmDialog(
+            self._main_panel,
+            "Are you sure you want to clear all vulnerability data?",
+            "Confirm Clear",
+            JOptionPane.YES_NO_OPTION
+        )
+        
+        if result == JOptionPane.YES_OPTION:
+            with self._vuln_lock:
+                self._vulnerabilities.clear()
+            # Clear from database
+            self._clear_all_data_from_database()
+            self._refresh_vulnerability_table()
+            print("All vulnerability data cleared")
+    
+    def _export_vulnerabilities(self, event):
+        """Export vulnerabilities in selected format - respects current filter"""
+        try:
+            # Get current filter selection
+            selected_filter = str(self._cwe_filter.getSelectedItem())
+            filter_cwe = None
+            if selected_filter != "All Vulnerabilities":
+                filter_cwe = selected_filter.split(" - ")[0]
+            
+            # Get export format
+            export_format = str(self._export_format.getSelectedItem())
+            
+            with self._vuln_lock:
+                # Prepare data for export - apply filter
+                filtered_vulns = []
+                
+                for vuln_id, vuln in self._vulnerabilities.items():
+                    # Apply the same filter as the table
+                    if filter_cwe and vuln['cwe'] != filter_cwe:
+                        continue
+                    filtered_vulns.append((vuln_id, vuln))
+                
+                if len(filtered_vulns) == 0:
+                    JOptionPane.showMessageDialog(
+                        self._main_panel,
+                        "No vulnerabilities to export with current filter",
+                        "Nothing to Export",
+                        JOptionPane.INFORMATION_MESSAGE
+                    )
+                    return
+                
+                # Export based on format
+                if export_format.startswith("Text"):
+                    self._export_as_text(filtered_vulns, filter_cwe)
+                elif export_format.startswith("CSV"):
+                    self._export_as_csv(filtered_vulns, filter_cwe)
+                elif export_format.startswith("JSON"):
+                    self._export_as_json(filtered_vulns, filter_cwe)
+                
+        except Exception as e:
+            print("Error exporting vulnerabilities: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                "Error exporting data: {}".format(str(e)),
+                "Export Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _export_as_text(self, filtered_vulns, filter_cwe):
+        """Export URLs as text list (one per line)"""
+        try:
+            # Extract unique URLs
+            urls = set()
+            for vuln_id, vuln in filtered_vulns:
+                urls.add(vuln['url'])
+            
+            # Create text content
+            text_content = '\n'.join(sorted(urls))
+            
+            # Show in dialog for copying
+            text_area = JTextArea(text_content)
+            text_area.setEditable(False)
+            text_area.setCaretPosition(0)
+            scroll_pane = JScrollPane(text_area)
+            scroll_pane.setPreferredSize(Dimension(500, 300))
+            
+            # Update dialog title
+            dialog_title = "Export URLs as Text (Copy from text area)"
+            if filter_cwe:
+                dialog_title = "Export {} URLs as Text (Copy from text area)".format(filter_cwe)
+            
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                scroll_pane,
+                dialog_title,
+                JOptionPane.INFORMATION_MESSAGE
+            )
+            
+            if filter_cwe:
+                print("Exported {} unique URLs for {} vulnerabilities as text".format(len(urls), filter_cwe))
+            else:
+                print("Exported {} unique URLs as text (all vulnerabilities)".format(len(urls)))
+                
+        except Exception as e:
+            print("Error exporting as text: {}".format(str(e)))
+            raise
+    
+    def _export_as_csv(self, filtered_vulns, filter_cwe):
+        """Export vulnerabilities as CSV file"""
+        try:
+            # Create file chooser
+            file_chooser = JFileChooser()
+            file_chooser.setDialogTitle("Save CSV Export")
+            
+            # Set default filename
+            default_name = "vulnerabilities_export.csv"
+            if filter_cwe:
+                default_name = "{}_vulnerabilities_export.csv".format(filter_cwe.replace("-", "_"))
+            file_chooser.setSelectedFile(java.io.File(default_name))
+            
+            # Add CSV filter
+            csv_filter = FileNameExtensionFilter("CSV Files (*.csv)", ["csv"])
+            file_chooser.setFileFilter(csv_filter)
+            
+            # Show save dialog
+            result = file_chooser.showSaveDialog(self._main_panel)
+            
+            if result == JFileChooser.APPROVE_OPTION:
+                file_path = file_chooser.getSelectedFile().getAbsolutePath()
+                
+                # Ensure .csv extension
+                if not file_path.lower().endswith('.csv'):
+                    file_path += '.csv'
+                
+                # Create CSV content
+                csv_content = "CWE,Description,Method,URL,Timestamp,Request_Hash\n"
+                for vuln_id, vuln in filtered_vulns:
+                    # Escape commas and quotes in values
+                    def csv_escape(value):
+                        value = str(value).replace('"', '""')
+                        if ',' in value or '"' in value or '\n' in value:
+                            return '"{}"'.format(value)
+                        return value
+                    
+                    csv_content += "{},{},{},{},{},{}\n".format(
+                        csv_escape(vuln['cwe']),
+                        csv_escape(vuln['description']),
+                        csv_escape(vuln['method']),
+                        csv_escape(vuln['url']),
+                        csv_escape(vuln['timestamp']),
+                        csv_escape(str(vuln['request_hash']))
+                    )
+                
+                # Write to file
+                with open(file_path, 'w') as f:
+                    f.write(csv_content)
+                
+                # Show success message
+                JOptionPane.showMessageDialog(
+                    self._main_panel,
+                    "Successfully exported {} vulnerabilities to:\n{}".format(len(filtered_vulns), file_path),
+                    "Export Successful",
+                    JOptionPane.INFORMATION_MESSAGE
+                )
+                
+                if filter_cwe:
+                    print("Exported {} {} vulnerabilities to CSV: {}".format(len(filtered_vulns), filter_cwe, file_path))
+                else:
+                    print("Exported {} vulnerabilities to CSV: {}".format(len(filtered_vulns), file_path))
+            else:
+                print("CSV export cancelled by user")
+                
+        except Exception as e:
+            print("Error exporting as CSV: {}".format(str(e)))
+            raise
+    
+    def _export_as_json(self, filtered_vulns, filter_cwe):
+        """Export vulnerabilities as JSON (original functionality)"""
+        try:
+            # Prepare data for export (exclude message objects)
+            export_data = {}
+            
+            for vuln_id, vuln in filtered_vulns:
+                export_data[str(vuln_id)] = {
+                    'cwe': vuln['cwe'],
+                    'description': vuln['description'],
+                    'url': vuln['url'],
+                    'method': vuln['method'],
+                    'timestamp': vuln['timestamp'],
+                    'request_hash': str(vuln['request_hash'])
+                }
+            
+            # Convert to JSON
+            json_data = json.dumps(export_data, indent=2)
+            
+            # Show in dialog for copying
+            text_area = JTextArea(json_data)
+            text_area.setEditable(False)
+            text_area.setCaretPosition(0)
+            scroll_pane = JScrollPane(text_area)
+            scroll_pane.setPreferredSize(Dimension(600, 400))
+            
+            # Update dialog title to show filter info
+            dialog_title = "Export Vulnerabilities as JSON (Copy from text area)"
+            if filter_cwe:
+                dialog_title = "Export {} Vulnerabilities as JSON (Copy from text area)".format(filter_cwe)
+            
+            JOptionPane.showMessageDialog(
+                self._main_panel,
+                scroll_pane,
+                dialog_title,
+                JOptionPane.INFORMATION_MESSAGE
+            )
+            
+            if filter_cwe:
+                print("Exported {} {} vulnerabilities to JSON".format(len(filtered_vulns), filter_cwe))
+            else:
+                print("Exported {} vulnerabilities to JSON (all vulnerabilities)".format(len(filtered_vulns)))
+                
+        except Exception as e:
+            print("Error exporting as JSON: {}".format(str(e)))
+            raise
+
+class CWEMessageEditorTab(IMessageEditorTab):
+    """Custom message editor tab for CWE tracking"""
+    
+    def __init__(self, extender, controller, editable):
+        self._extender = extender
+        self._controller = controller
+        self._editable = editable
+        self._current_message = None
+        self._current_request_info = None
+        
+        # Create the UI
+        self._create_tab_ui()
+    
+    def _create_tab_ui(self):
+        """Create the UI for the CWE tracking tab"""
+        self._component = JPanel(BorderLayout())
+        
+        # Top panel for CWE selection
+        top_panel = JPanel()
+        top_panel.setLayout(BoxLayout(top_panel, BoxLayout.Y_AXIS))
+        
+        # Request info panel
+        info_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        self._request_info_label = JLabel("No request selected")
+        self._request_info_label.setFont(self._request_info_label.getFont().deriveFont(12.0))
+        info_panel.add(self._request_info_label)
+        top_panel.add(info_panel)
+        
+        # CWE selection panel
+        cwe_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        cwe_panel.add(JLabel("Mark as vulnerable to:"))
+        
+        # CWE dropdown
+        cwe_items = ["Select CWE..."] + ["{} - {}".format(k, v) for k, v in self._extender._cwe_types.items()]
+        self._cwe_combo = JComboBox(cwe_items)
+        cwe_panel.add(self._cwe_combo)
+        
+        # Mark vulnerability button
+        self._mark_button = JButton("Mark Vulnerability", actionPerformed=self._mark_vulnerability)
+        cwe_panel.add(self._mark_button)
+        
+        # Add to watch list button
+        self._watch_button = JButton("Add to Watch List", actionPerformed=self._add_to_watch_list)
+        cwe_panel.add(self._watch_button)
+        
+        top_panel.add(cwe_panel)
+        
+        self._component.add(top_panel, BorderLayout.NORTH)
+        
+        # Center panel for existing vulnerabilities
+        center_panel = JPanel(BorderLayout())
+        center_panel.add(JLabel("Existing vulnerabilities for this request:"), BorderLayout.NORTH)
+        
+        # Vulnerabilities table for current request
+        column_names = ["CWE", "Description", "Timestamp", "Actions"]
+        self._request_vuln_model = DefaultTableModel(column_names, 0)
+        self._request_vuln_table = JTable(self._request_vuln_model)
+        self._request_vuln_table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        
+        # Add click handler for remove button
+        class RequestTableClickHandler(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+                
+            def mouseClicked(self, event):
+                if event.getClickCount() == 1:
+                    table = event.getSource()
+                    row = table.rowAtPoint(event.getPoint())
+                    col = table.columnAtPoint(event.getPoint())
+                    
+                    # Check if "Actions" column was clicked
+                    if col == 3 and row >= 0:  # Actions column
+                        self.extension_parent._remove_request_vulnerability_at_row(row)
+        
+        self._request_vuln_table.addMouseListener(RequestTableClickHandler(self))
+        
+        request_scroll = JScrollPane(self._request_vuln_table)
+        center_panel.add(request_scroll, BorderLayout.CENTER)
+        
+        self._component.add(center_panel, BorderLayout.CENTER)
+        
+        # Bottom panel for statistics
+        stats_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        self._stats_label = JLabel("No vulnerabilities for this request")
+        stats_panel.add(self._stats_label)
+        self._component.add(stats_panel, BorderLayout.SOUTH)
+    
+    def getTabCaption(self):
+        """Return the caption for this tab"""
+        return "Vuln Tracker"
+    
+    def getUiComponent(self):
+        """Return the UI component for this tab"""
+        return self._component
+    
+    def isEnabled(self, content, isRequest):
+        """Return True if this tab should be enabled for the given content"""
+        return isRequest  # Only show for requests, not responses
+    
+    def setMessage(self, content, isRequest):
+        """Called when the message changes"""
+        print("CWE Tab setMessage called - content: {}, isRequest: {}".format(content is not None, isRequest))
+        
+        if content is None or not isRequest:
+            print("No content or not a request - clearing")
+            self._current_message = None
+            self._current_request_info = None
+            self._update_ui_for_request()
+            return
+        
+        self._current_message = content
+        try:
+            # Parse the request manually first to avoid URL issues
+            self._current_request_info = self._parse_request_manually(content)
+            
+            if self._current_request_info is not None:
+                print("Successfully parsed request - Method: {}, Path: {}".format(
+                    self._current_request_info.getMethod(), 
+                    self._current_request_info.getUrl().getPath()))
+            else:
+                print("Failed to parse request")
+                    
+            self._update_ui_for_request()
+                
+        except Exception as e:
+            print("Error analyzing request in CWE tab: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+            self._current_request_info = None
+            self._update_ui_for_request()
+    
+    def _parse_request_manually(self, content):
+        """Manually parse request if helpers fail"""
+        try:
+            # Convert content to string if it's bytes
+            request_str = ""
+            if hasattr(content, 'tostring'):
+                request_str = content.tostring()
+            elif isinstance(content, (bytes, bytearray)):
+                request_str = str(content)
+            elif hasattr(content, '__iter__'):
+                # Handle byte arrays
+                try:
+                    request_str = ''.join(chr(b) for b in content)
+                except:
+                    request_str = str(content)
+            else:
+                request_str = str(content)
+            
+            print("Request string preview: {}".format(request_str[:200]))
+            
+            lines = request_str.split('\n')
+            if len(lines) > 0:
+                first_line = lines[0].strip()
+                parts = first_line.split(' ')
+                if len(parts) >= 2:
+                    method = parts[0]
+                    path = parts[1]
+                    
+                    # Extract host from headers
+                    host = "unknown.host"
+                    for line in lines[1:]:
+                        if line.lower().startswith('host:'):
+                            host = line.split(':', 1)[1].strip()
+                            break
+                    
+                    # Create a robust request info object
+                    class ManualRequestInfo:
+                        def __init__(self, method, path, host):
+                            self.method = method
+                            self.path = path
+                            self.host = host
+                            
+                        def getMethod(self):
+                            return self.method
+                            
+                        def getUrl(self):
+                            # Create a URL object that works with our needs
+                            class ManualURL:
+                                def __init__(self, path, host):
+                                    self.path = path
+                                    self.host = host
+                                    
+                                def getPath(self):
+                                    return self.path
+                                    
+                                def getHost(self):
+                                    return self.host
+                                    
+                                def __str__(self):
+                                    return "https://{}{}".format(self.host, self.path)
+                                    
+                            return ManualURL(self.path, self.host)
+                    
+                    print("Parsed: {} {} (Host: {})".format(method, path, host))
+                    return ManualRequestInfo(method, path, host)
+            
+            print("Could not parse request line")
+            return None
+        except Exception as e:
+            print("Manual parsing failed: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def getMessage(self):
+        """Return the current message"""
+        return self._current_message
+    
+    def isModified(self):
+        """Return whether the message has been modified"""
+        return False  # This tab doesn't modify the message
+    
+    def getSelectedData(self):
+        """Return the selected data"""
+        return None  # This tab doesn't support selection
+    
+    def _update_ui_for_request(self):
+        """Update the UI based on the current request"""
+        if self._current_request_info is None:
+            self._request_info_label.setText("No request selected")
+            self._clear_vulnerabilities_table()
+            self._stats_label.setText("No vulnerabilities for this request")
+            return
+        
+        try:
+            url = self._current_request_info.getUrl()
+            method = self._current_request_info.getMethod()
+            
+            # Get clean path for display
+            clean_path = self._extender._get_path_without_params(url)
+            full_url_str = str(url)
+            
+            # Show clean path but indicate if there are parameters
+            if '?' in full_url_str:
+                display_text = "{} {} (with parameters)".format(method, "https://{}{}".format(url.getHost() if hasattr(url, 'getHost') else url.host, clean_path))
+            else:
+                display_text = "{} {}".format(method, full_url_str)
+                
+            self._request_info_label.setText(display_text)
+            
+            # Update vulnerabilities table for this request
+            self._update_vulnerabilities_table(url, method)
+            
+        except Exception as e:
+            print("Error updating UI for request: {}".format(str(e)))
+            self._request_info_label.setText("Error analyzing request")
+            self._clear_vulnerabilities_table()
+    
+    def _update_vulnerabilities_table(self, url, method):
+        """Update the vulnerabilities table for the current request"""
+        # Clear existing rows
+        self._request_vuln_model.setRowCount(0)
+        
+        # Get request hash (ignoring query parameters for consistent grouping)
+        request_hash = self._extender._create_request_hash(url, method)
+        
+        # Find vulnerabilities for this request
+        matching_vulns = []
+        with self._extender._vuln_lock:
+            for vuln_id, vuln in self._extender._vulnerabilities.items():
+                if vuln['request_hash'] == request_hash:
+                    matching_vulns.append((vuln_id, vuln))
+        
+        # Add to table
+        for vuln_id, vuln in matching_vulns:
+            row_data = [
+                vuln['cwe'],
+                vuln['description'],
+                vuln['timestamp'],
+                "Remove"
+            ]
+            self._request_vuln_model.addRow(row_data)
+        
+        # Update stats
+        count = len(matching_vulns)
+        if count == 0:
+            self._stats_label.setText("No vulnerabilities for this request")
+        elif count == 1:
+            self._stats_label.setText("1 vulnerability found for this request")
+        else:
+            self._stats_label.setText("{} vulnerabilities found for this request".format(count))
+    
+    def _clear_vulnerabilities_table(self):
+        """Clear the vulnerabilities table"""
+        self._request_vuln_model.setRowCount(0)
+    
+    def _mark_vulnerability(self, event):
+        """Mark the current request with the selected CWE"""
+        print("Mark vulnerability called - current_request_info: {}".format(self._current_request_info))
+        
+        if self._current_request_info is None:
+            print("No request info available")
+            JOptionPane.showMessageDialog(
+                self._component,
+                "No request selected",
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+            return
+        
+        selected_item = str(self._cwe_combo.getSelectedItem())
+        print("Selected CWE item: {}".format(selected_item))
+        
+        if selected_item == "Select CWE...":
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Please select a CWE type",
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+            return
+        
+        try:
+            # Parse CWE code and description
+            cwe_code = selected_item.split(" - ")[0]
+            description = selected_item.split(" - ")[1]
+            
+            url = self._current_request_info.getUrl()
+            method = self._current_request_info.getMethod()
+            # Create hash ignoring query parameters for consistent grouping
+            request_hash = self._extender._create_request_hash(url, method)
+            
+            # Check for duplicate CWE
+            with self._extender._vuln_lock:
+                for vuln_id, vuln in self._extender._vulnerabilities.items():
+                    if (vuln['request_hash'] == request_hash and 
+                        vuln['cwe'] == cwe_code):
+                        JOptionPane.showMessageDialog(
+                            self._component,
+                            "This request is already marked as vulnerable to {}".format(cwe_code),
+                            "Duplicate Vulnerability",
+                            JOptionPane.WARNING_MESSAGE
+                        )
+                        return
+                
+                # Create unique vulnerability ID
+                self._extender._vuln_counter += 1
+                vuln_id = self._extender._vuln_counter
+                
+                # Store vulnerability
+                self._extender._vulnerabilities[vuln_id] = {
+                    'cwe': cwe_code,
+                    'description': description,
+                    'url': str(url),
+                    'method': method,
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'request_hash': request_hash,
+                    'message': None  # We don't have access to the full message object here
+                }
+                
+                # Save to database
+                self._extender._save_vulnerability_to_database(vuln_id, self._extender._vulnerabilities[vuln_id])
+            
+            # Update the main vulnerabilities tab
+            self._extender._refresh_vulnerability_table()
+            
+            # Update this tab's table
+            self._update_vulnerabilities_table(url, method)
+            
+            # Reset combo box
+            self._cwe_combo.setSelectedIndex(0)
+            
+            # Show success message
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Marked {} {} as vulnerable to {}\n{}".format(method, url, cwe_code, description),
+                "Vulnerability Marked",
+                JOptionPane.INFORMATION_MESSAGE
+            )
+            
+            print("Marked vulnerability from CWE tab: {} {} - {} {}".format(method, url, cwe_code, description))
+            
+        except Exception as e:
+            print("Error marking vulnerability from CWE tab: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Error marking vulnerability: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _add_to_watch_list(self, event):
+        """Add the current request path to the watch list"""
+        print("Add to watch list called - current_request_info: {}".format(self._current_request_info))
+        
+        if self._current_request_info is None:
+            print("No request info available for watch list")
+            JOptionPane.showMessageDialog(
+                self._component,
+                "No request selected",
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+            return
+        
+        try:
+            url = self._current_request_info.getUrl()
+            path = url.getPath()
+            
+            # Add to watch list
+            current_text = self._extender._path_textarea.getText()
+            if current_text:
+                new_text = current_text + '\n' + path
+            else:
+                new_text = path
+            
+            self._extender._path_textarea.setText(new_text)
+            self._extender._update_paths(None)
+            
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Added '{}' to watch list".format(path),
+                "Path Added",
+                JOptionPane.INFORMATION_MESSAGE
+            )
+            
+        except Exception as e:
+            print("Error adding path to watch list from CWE tab: {}".format(str(e)))
+    
+    def _remove_request_vulnerability_at_row(self, row):
+        """Remove vulnerability at specified row for current request"""
+        try:
+            if row < 0 or row >= self._request_vuln_model.getRowCount():
+                return
+            
+            # Get vulnerability details
+            cwe = str(self._request_vuln_model.getValueAt(row, 0))
+            timestamp = str(self._request_vuln_model.getValueAt(row, 2))
+            
+            url = self._current_request_info.getUrl()
+            method = self._current_request_info.getMethod()
+            
+            # Find and remove the vulnerability
+            with self._extender._vuln_lock:
+                vuln_to_remove = None
+                for vuln_id, vuln in self._extender._vulnerabilities.items():
+                    if (vuln['cwe'] == cwe and 
+                        vuln['url'] == str(url) and 
+                        vuln['method'] == method and
+                        vuln['timestamp'] == timestamp):
+                        vuln_to_remove = vuln_id
+                        break
+                
+                if vuln_to_remove is not None:
+                    del self._extender._vulnerabilities[vuln_to_remove]
+                    # Remove from database
+                    self._extender._remove_vulnerability_from_database(vuln_to_remove)
+                    print("Removed vulnerability from CWE tab: {} {} - {}".format(method, url, cwe))
+            
+            # Update both tables
+            self._extender._refresh_vulnerability_table()
+            self._update_vulnerabilities_table(url, method)
+            
+        except Exception as e:
+            print("Error removing vulnerability from CWE tab: {}".format(str(e)))
+
+# Register the extension
+if __name__ in ('__main__', 'main'):
+    BurpExtender()
