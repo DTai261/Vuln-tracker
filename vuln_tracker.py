@@ -11,7 +11,7 @@ from java.awt import Component, GridBagLayout, GridBagConstraints, Insets, Color
 from java.awt.event import ActionListener, MouseAdapter, MouseEvent
 from javax.swing import JPanel, JButton, JTextArea, JScrollPane, JLabel, JSplitPane
 from javax.swing import JMenuItem, JOptionPane, SwingUtilities, JTabbedPane, JComboBox, JPopupMenu
-from javax.swing import JTable, JTextField, ListSelectionModel, Box, BoxLayout, JFileChooser, JCheckBox, JProgressBar
+from javax.swing import JTable, JTextField, ListSelectionModel, Box, BoxLayout, JFileChooser, JCheckBox, JProgressBar, BorderFactory
 from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
 from javax.swing.filechooser import FileNameExtensionFilter
 import java.io
@@ -915,7 +915,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 'manual_audited': False,
                                 'scanned': False,
                                 'last_audit': 'Never',
-                                'highlight': False
+                                'highlight': False,
+                                'note': ''
                             })
                     
                     loaded_paths_count = len(data['watch_list_audit'])
@@ -945,7 +946,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                     'manual_audited': False,
                                     'scanned': False,
                                     'last_audit': 'Never',
-                                    'highlight': False
+                                    'highlight': False,
+                                    'note': ''
                                 })
                         
                         loaded_paths_count = len(data['watch_list_audit'])
@@ -964,6 +966,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Update watch_list_audit variable after migration
                 watch_list_audit = data.get("watch_list_audit", [])
+                
+                # Ensure backward compatibility: add note field to existing entries if missing
+                for item in watch_list_audit:
+                    if isinstance(item, dict) and 'note' not in item:
+                        item['note'] = ''
             
             # Store the final audit data in self._data
             self._data['watch_list_audit'] = watch_list_audit
@@ -986,6 +993,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 self._auto_audit_scanner_enabled = settings.get("auto_audit_scanner_enabled", True)
                 print("Loaded auto-audit settings - Repeater: {}, Scanner: {}".format(
                     self._auto_audit_repeater_enabled, self._auto_audit_scanner_enabled))
+            
+            # Load table view settings
+            self._show_full_urls_in_table = settings.get("show_full_urls_in_table", True)
+            print("Loaded table view setting - Show full URLs: {}".format(self._show_full_urls_in_table))
             
             # Load sitemap configuration if available
             sitemap_config = settings.get("sitemap_config", None)
@@ -1596,31 +1607,35 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # CWE definitions
         self._cwe_types = {
             "CWE-89": "SQL Injection",
+            "CWE-78": "OS Command Injection",
+            "CWE-94": "Code Injection",
+            "CWE-611": "XML External Entity (XXE) Injection",
+            "CWE-502": "Unsafe Deserialization",
             "CWE-79": "Reflected Cross-Site Scripting (XSS)",
             "CWE-79_2": "Stored Cross-Site Scripting (XSS)",
-            "CWE-78": "Command Injection", 
-            "CWE-22": "Path Traversal",
-            "CWE-352": "Cross-Site Request Forgery (CSRF)",
             "CWE-306": "Missing Authentication",
             "CWE-862": "Missing Authorization",
-            "CWE-200": "Information Disclosure",
-            "CWE-94": "Code Injection",
-            "CWE-502": "Deserialization",
-            "CWE-611": "XXE Injection",
-            "CWE-601": "Open Redirect",
-            "CWE-434": "File Upload",
+            "CWE-639": "Insecure Direct Object Reference (IDOR)",
             "CWE-307": "Brute Force",
-            "CWE-1104": "Use of Unmaintained Third Party Components",
+            "CWE-204": "User Enumeration",
+            "CWE-352": "Cross-Site Request Forgery (CSRF)",
+            "CWE-601": "Open Redirect",
+            "CWE-434": "Unrestricted File Upload",
+            "CWE-22": "Path Traversal",
             "CWE-841": "Business Logic Errors",
             "CWE-918": "Server-Side Request Forgery (SSRF)",
-            "CWE-639": "Insecure Direct Object Reference (IDOR)",
-            "CWE-204": "User Enumeration",
+            "CWE-1104": "Use of Unmaintained Third Party Components",
+            "CWE-200": "Information Disclosure",
             "CWE-209": "Error Message Containing Sensitive Information"
         }
+
         
         # Auto-audit settings - default to enabled
         self._auto_audit_repeater_enabled = True
         self._auto_audit_scanner_enabled = True
+        
+        # Table view settings - default to show full URLs
+        self._show_full_urls_in_table = True
         
         # Sitemap monitoring settings
         self._sitemap_config = None
@@ -1771,11 +1786,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         table_panel = JPanel(BorderLayout())
         
         # Instructions
-        instruction_label = JLabel("Monitor paths for manual testing (Repeater) and automated scanning:")
+        instruction_label = JLabel("Monitor paths for manual testing (Repeater) and automated scanning. Right-click or use buttons to manage notes and other operations:")
         table_panel.add(instruction_label, BorderLayout.NORTH)
         
         # Create table for watch list with audit status
-        column_names = ["Path/URL", "Manual Audited", "Scanned", "Last Audit", "Highlight"]
+        column_names = ["Path/URL", "Manual Audited", "Scanned", "Last Audit", "Note", "Highlight"]
         
         # Create custom table model
         class AuditTableModel(DefaultTableModel):
@@ -1783,12 +1798,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 DefaultTableModel.__init__(self, column_names, rows)
             
             def isCellEditable(self, row, column):
-                if column == 4:  # "Highlight" column is user-editable
+                if column == 4:  # "Note" column is user-editable
+                    return True
+                if column == 5:  # "Highlight" column is user-editable
                     return True
                 return False  # Other columns are auto-managed by tool detection
             
             def getColumnClass(self, column):
-                if column in [1, 2, 4]:  # "Manual Audited", "Scanned", "Highlight" columns
+                if column in [1, 2, 5]:  # "Manual Audited", "Scanned", "Highlight" columns
                     return java.lang.Boolean
                 return java.lang.String
         
@@ -1812,7 +1829,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         column_model.getColumn(1).setPreferredWidth(100)  # Manual Audited
         column_model.getColumn(2).setPreferredWidth(80)   # Scanned
         column_model.getColumn(3).setPreferredWidth(130)  # Last Audit
-        column_model.getColumn(4).setPreferredWidth(80)   # Highlight
+        column_model.getColumn(4).setPreferredWidth(200)  # Note
+        column_model.getColumn(5).setPreferredWidth(80)   # Highlight
         
         # Add table change listener to save audit status
         self._watch_table_model.addTableModelListener(lambda e: self._on_audit_status_changed(e))
@@ -1831,6 +1849,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # Remove selected path button
         remove_path_btn = JButton("Remove Selected", actionPerformed=self._remove_selected_path)
         table_button_panel.add(remove_path_btn)
+        
+        # Edit note button
+        edit_note_btn = JButton("Edit Note", actionPerformed=self._edit_note_for_selected)
+        table_button_panel.add(edit_note_btn)
         
         # Clear all button
         clear_all_btn = JButton("Clear All", actionPerformed=self._clear_all_from_table)
@@ -1893,6 +1915,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     
                     selected_rows = table.getSelectedRows()
                     
+                    # Edit Note option (only for single selection)
+                    if len(selected_rows) == 1:
+                        note_item = JMenuItem("Edit Note...")
+                        note_item.addActionListener(lambda e: self.extension_parent._edit_note_for_row(selected_rows[0]))
+                        popup.add(note_item)
+                        popup.addSeparator()
+                    
                     # Delete option
                     if len(selected_rows) == 1:
                         delete_item = JMenuItem("Delete Selected Request")
@@ -1910,6 +1939,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     
                     vuln_item.addActionListener(lambda e: self.extension_parent._mark_selected_as_vulnerable(selected_rows))
                     popup.add(vuln_item)
+                    
+                    # Set highlight option
+                    if len(selected_rows) == 1:
+                        highlight_item = JMenuItem("Enable Highlighting")
+                        unhighlight_item = JMenuItem("Disable Highlighting")
+                    else:
+                        highlight_item = JMenuItem("Enable Highlighting for {} Requests".format(len(selected_rows)))
+                        unhighlight_item = JMenuItem("Disable Highlighting for {} Requests".format(len(selected_rows)))
+                    
+                    highlight_item.addActionListener(lambda e: self.extension_parent._set_highlight_for_selected(selected_rows, True))
+                    unhighlight_item.addActionListener(lambda e: self.extension_parent._set_highlight_for_selected(selected_rows, False))
+                    popup.add(highlight_item)
+                    popup.add(unhighlight_item)
+                    popup.addSeparator()
                     
                     # Add "Send to Repeater" option (only for single selection)
                     if len(selected_rows) == 1:
@@ -2003,9 +2046,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # Apply renderers based on column type
         for i in range(self._watch_table.getColumnCount()):
             column = self._watch_table.getColumnModel().getColumn(i)
-            if i in [1, 2, 4]:  # "Manual Audited", "Scanned", "Highlight" columns
+            if i in [1, 2, 5]:  # "Manual Audited", "Scanned", "Highlight" columns
                 column.setCellRenderer(checkbox_renderer)
-            else:  # Text columns (Path/URL and Last Audit)
+            else:  # Text columns (Path/URL, Last Audit, Note)
                 column.setCellRenderer(text_renderer)
     
     def _delete_selected_requests(self):
@@ -2064,11 +2107,21 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if not selected_rows:
                 return
             
-            # Get paths from selected rows
+            # Get full URLs from internal storage (not table display)
             selected_paths = []
             for row in selected_rows:
-                path_url = self._watch_table_model.getValueAt(row, 0)
-                selected_paths.append(path_url)
+                # Get the full URL from internal storage based on row index
+                if (hasattr(self, '_data') and 'watch_list_audit' in self._data and 
+                    row < len(self._data['watch_list_audit'])):
+                    full_url = self._data['watch_list_audit'][row].get('path', '')
+                    if full_url:
+                        selected_paths.append(full_url)
+                        print("Selected for vulnerability marking: {}".format(full_url))
+                else:
+                    # Fallback: get from table display (might be just a path)
+                    path_url = self._watch_table_model.getValueAt(row, 0)
+                    selected_paths.append(path_url)
+                    print("Fallback: Using table display value: {}".format(path_url))
             
             # Show CWE selection dialog
             from javax.swing import JDialog, JPanel, JLabel, JComboBox, JButton, JOptionPane
@@ -2162,6 +2215,38 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error marking selected as vulnerable: {}".format(str(e)))
             self._show_status_feedback("Error marking vulnerabilities: {}".format(str(e)))
     
+    def _get_actual_target_host(self):
+        """Get the actual target hostname from current Burp project"""
+        try:
+            # Try to get a target from sitemap first
+            targets = self._get_available_targets()
+            if targets:
+                # Return the first available target (most common case)
+                return targets[0]
+            
+            # Fallback: try to get from proxy history
+            if hasattr(self._callbacks, 'getProxyHistory'):
+                history = self._callbacks.getProxyHistory()
+                if history:
+                    for item in history[:10]:  # Check first 10 items
+                        try:
+                            url = item.getUrl()
+                            if url:
+                                return "{}://{}:{}".format(
+                                    url.getProtocol(),
+                                    url.getHost(),
+                                    url.getPort() if url.getPort() != -1 else (443 if url.getProtocol() == "https" else 80)
+                                )
+                        except:
+                            continue
+            
+            # Last resort: return None so caller can handle appropriately
+            return None
+            
+        except Exception as e:
+            print("Error getting actual target host: {}".format(str(e)))
+            return None
+
     def _process_bulk_vulnerability_marking(self, selected_paths, cwe_selection):
         """Process marking multiple paths as vulnerable"""
         try:
@@ -2172,23 +2257,57 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             marked_count = 0
             duplicate_count = 0
             
-            for path in selected_paths:
+            for path_or_url in selected_paths:
                 try:
-                    # Create a fake URL and method for consistency with existing vulnerability tracking
-                    # Since we only have paths from the watch list, we'll use default values
-                    method = "GET"  # Default method
+                    # Default method
+                    method = "GET"
                     
-                    # Try to construct a reasonable URL from the path
-                    if path.startswith("http"):
-                        full_url = path
+                    # Determine if we have a full URL or just a path
+                    if path_or_url.startswith("http"):
+                        # We have a full URL (from sitemap import)
+                        full_url = path_or_url
+                        # Extract just the path portion for the hash
+                        try:
+                            from java.net import URL
+                            url_obj = URL(full_url)
+                            path_for_hash = url_obj.getPath()
+                            if url_obj.getQuery():
+                                path_for_hash += "?" + url_obj.getQuery()
+                        except:
+                            # Fallback: extract path manually
+                            if "://" in full_url:
+                                # Remove protocol and host
+                                parts = full_url.split("://", 1)
+                                if len(parts) > 1:
+                                    remaining = parts[1]
+                                    if "/" in remaining:
+                                        path_for_hash = "/" + remaining.split("/", 1)[1]
+                                    else:
+                                        path_for_hash = "/"
+                                else:
+                                    path_for_hash = "/"
+                            else:
+                                path_for_hash = full_url
                     else:
-                        # Assume HTTPS and add a default host
-                        full_url = "https://target.com{}".format(path if path.startswith("/") else "/" + path)
+                        # We have just a path (legacy data or manual entry)
+                        path_for_hash = path_or_url
+                        # Try to get the actual target host from Burp
+                        actual_target = self._get_actual_target_host()
+                        if actual_target:
+                            # Use the actual target host
+                            if not path_or_url.startswith("/"):
+                                path_or_url = "/" + path_or_url
+                            full_url = "{}{}".format(actual_target, path_or_url)
+                            print("Using actual target for vulnerability marking: {}".format(full_url))
+                        else:
+                            # Fallback: use a placeholder but warn user
+                            full_url = "https://[TARGET_HOST]{}".format(path_or_url if path_or_url.startswith("/") else "/" + path_or_url)
+                            print("Warning: Could not determine actual target host, using placeholder: {}".format(full_url))
                     
-                    # Create hash for grouping (this is simplified since we don't have actual request objects)
-                    request_hash = hash("{}:{}".format(method, path))
+                    # Create hash for grouping using the path portion
+                    request_hash = hash("{}:{}".format(method, path_for_hash))
                     
-                    # Check for duplicate CWE on same path
+                    # Check for duplicate CWE on same URL
                     is_duplicate = False
                     with self._vuln_lock:
                         for vuln_id, vuln in self._vulnerabilities.items():
@@ -2251,6 +2370,63 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         except Exception as e:
             print("Error processing bulk vulnerability marking: {}".format(str(e)))
             self._show_status_feedback("Error processing vulnerabilities: {}".format(str(e)))
+    
+    def _set_highlight_for_selected(self, selected_rows, enable_highlight=True):
+        """Enable or disable highlighting for selected requests in the watch table"""
+        try:
+            if not selected_rows:
+                return
+            
+            # Confirm action
+            from javax.swing import JOptionPane
+            action_word = "enable" if enable_highlight else "disable"
+            action_word_title = "Enable" if enable_highlight else "Disable"
+            
+            if len(selected_rows) == 1:
+                message = "{} highlighting for the selected request?".format(action_word_title)
+            else:
+                message = "{} highlighting for {} selected requests?".format(action_word_title, len(selected_rows))
+            
+            result = JOptionPane.showConfirmDialog(
+                None,
+                message,
+                "Confirm {} Highlighting".format(action_word_title),
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            )
+            
+            if result == JOptionPane.YES_OPTION:
+                # Set highlight value for all selected rows
+                for row in selected_rows:
+                    # Column 5 is the Highlight column
+                    self._watch_table_model.setValueAt(enable_highlight, row, 5)
+                
+                # Update the internal data structure
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    for row in selected_rows:
+                        path_url = self._watch_table_model.getValueAt(row, 0)
+                        # Find the corresponding item in the watch list audit data
+                        for item in self._data['watch_list_audit']:
+                            if isinstance(item, dict) and item.get('path') == path_url:
+                                item['highlight'] = enable_highlight
+                                break
+                
+                # Save the updated data
+                self._save_watch_list_data()
+                
+                # Show success message
+                action_past = "enabled" if enable_highlight else "disabled"
+                if len(selected_rows) == 1:
+                    success_message = "Highlighting {} for the selected request".format(action_past)
+                else:
+                    success_message = "Highlighting {} for {} requests".format(action_past, len(selected_rows))
+                
+                self._show_status_feedback(success_message)
+                print("{} highlighting for {} request(s)".format(action_past.title(), len(selected_rows)))
+                
+        except Exception as e:
+            print("Error setting highlight for selected requests: {}".format(str(e)))
+            self._show_status_feedback("Error updating highlighting: {}".format(str(e)))
     
     def _send_to_repeater(self, row_index):
         """Send the selected request to Burp Repeater"""
@@ -2724,28 +2900,34 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     for item in self._data['watch_list_audit']:
                         if isinstance(item, dict):
                             path = item.get('path', '')
+                            # Use display format for the table
+                            display_path = self._get_display_url(path)
                             manual_audited = item.get('manual_audited', False)
                             scanned = item.get('scanned', False)
                             date_added = item.get('date_added', datetime.now().strftime("%Y-%m-%d %H:%M"))
                             last_audit = item.get('last_audit', date_added if manual_audited or scanned else "Never")
+                            note = item.get('note', '')  # Get user note
                             highlight = item.get('highlight', False)  # Default to false for highlighting
-                            row_data = [path, manual_audited, scanned, last_audit, highlight]
+                            row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
-                            print("Added to table: {} (manual: {}, scanned: {}, last audit: {}, highlight: {})".format(
-                                path, manual_audited, scanned, last_audit, highlight))
+                            print("Added to table: {} (manual: {}, scanned: {}, last audit: {}, note: '{}', highlight: {})".format(
+                                display_path, manual_audited, scanned, last_audit, note, highlight))
                 elif hasattr(self, '_data') and self._data.get('watch_list_audit'):
                     print("Creating table entries from watch list audit data")
                     # Fallback: create table entries from watch list audit data
                     for item in self._data['watch_list_audit']:
                         if isinstance(item, dict):
                             path = item.get('path', '')
+                            # Use display format for the table
+                            display_path = self._get_display_url(path)
                             manual_audited = item.get('manual_audited', False)
                             scanned = item.get('scanned', False)
                             last_audit = item.get('last_audit', "Never")
+                            note = item.get('note', '')  # Get user note
                             highlight = item.get('highlight', False)
-                            row_data = [path, manual_audited, scanned, last_audit, highlight]
+                            row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
-                            print("Added to table (fallback): {}".format(path))
+                            print("Added to table (fallback): {}".format(display_path))
                 else:
                     print("No path data found to populate table")
                 
@@ -2826,27 +3008,229 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             self._is_updating_gui = False
             traceback.print_exc()
     
+    def _validate_and_convert_paths(self, path_list):
+        """Validate path list and convert paths to full URLs if needed"""
+        try:
+            if not path_list:
+                return []
+            
+            # Check if any paths are missing hostname/schema
+            paths_without_url = []
+            full_urls = []
+            
+            for path in path_list:
+                path = path.strip()
+                if not path:
+                    continue
+                    
+                # Check if it's already a full URL
+                if path.startswith('http://') or path.startswith('https://'):
+                    full_urls.append(path)
+                else:
+                    # It's just a path
+                    paths_without_url.append(path)
+            
+            # If we have paths without URLs, prompt user for base URL
+            if paths_without_url:
+                from javax.swing import JOptionPane, JTextField, JPanel, JLabel
+                from java.awt import GridBagLayout, GridBagConstraints, Insets
+                
+                # Show dialog to get base URL
+                dialog_panel = JPanel(GridBagLayout())
+                gbc = GridBagConstraints()
+                gbc.insets = Insets(5, 5, 5, 5)
+                gbc.anchor = GridBagConstraints.WEST
+                
+                # Title
+                gbc.gridx = 0
+                gbc.gridy = 0
+                gbc.gridwidth = 2
+                title_label = JLabel("No hostname and schema found for {} path(s)".format(len(paths_without_url)))
+                title_label.setFont(title_label.getFont().deriveFont(14.0))
+                dialog_panel.add(title_label, gbc)
+                
+                # Show example paths
+                gbc.gridy = 1
+                if len(paths_without_url) <= 3:
+                    example_text = "Paths: " + ", ".join(paths_without_url)
+                else:
+                    example_text = "Paths: " + ", ".join(paths_without_url[:3]) + "... and {} more".format(len(paths_without_url) - 3)
+                example_label = JLabel(example_text)
+                example_label.setFont(example_label.getFont().deriveFont(10.0))
+                dialog_panel.add(example_label, gbc)
+                
+                # Base URL input
+                gbc.gridy = 2
+                gbc.gridwidth = 1
+                gbc.weightx = 0.0
+                dialog_panel.add(JLabel("Please specify base URL:"), gbc)
+                
+                gbc.gridx = 1
+                gbc.weightx = 1.0
+                gbc.fill = GridBagConstraints.HORIZONTAL
+                base_url_field = JTextField("https://example.com", 20)
+                dialog_panel.add(base_url_field, gbc)
+                
+                # Show dialog
+                result = JOptionPane.showConfirmDialog(
+                    None,
+                    dialog_panel,
+                    "Specify Base URL",
+                    JOptionPane.OK_CANCEL_OPTION,
+                    JOptionPane.QUESTION_MESSAGE
+                )
+                
+                if result == JOptionPane.OK_OPTION:
+                    base_url = base_url_field.getText().strip()
+                    
+                    if not base_url:
+                        self._show_status_feedback("Base URL is required for path conversion")
+                        return []
+                    
+                    # Validate base URL format
+                    if not (base_url.startswith('http://') or base_url.startswith('https://')):
+                        self._show_status_feedback("Base URL must start with http:// or https://")
+                        return []
+                    
+                    # Remove trailing slash from base URL if present
+                    if base_url.endswith('/'):
+                        base_url = base_url[:-1]
+                    
+                    # Convert paths to full URLs
+                    for path in paths_without_url:
+                        if path.startswith('/'):
+                            full_url = base_url + path
+                        else:
+                            full_url = base_url + '/' + path
+                        full_urls.append(full_url)
+                    
+                    print("Converted {} paths using base URL: {}".format(len(paths_without_url), base_url))
+                    for i, path in enumerate(paths_without_url):
+                        print("  {} -> {}{}{}".format(path, base_url, '/' if not path.startswith('/') else '', path if path.startswith('/') else path))
+                    
+                else:
+                    # User cancelled
+                    self._show_status_feedback("Base URL input cancelled")
+                    return []
+            
+            return full_urls
+            
+        except Exception as e:
+            print("Error validating and converting paths: {}".format(str(e)))
+            self._show_status_feedback("Error processing paths: {}".format(str(e)))
+            return []
+    
+    def _url_to_path(self, url_or_path):
+        """Convert a full URL to just the path portion for display"""
+        try:
+            if not url_or_path:
+                return url_or_path
+            
+            # If it's already just a path, return as-is
+            if not url_or_path.startswith('http'):
+                return url_or_path
+            
+            # Extract path from full URL
+            if "://" in url_or_path:
+                # Remove protocol and host
+                parts = url_or_path.split("://", 1)
+                if len(parts) > 1:
+                    remaining = parts[1]
+                    if "/" in remaining:
+                        path = "/" + remaining.split("/", 1)[1]
+                    else:
+                        path = "/"
+                    return path
+            
+            return url_or_path
+            
+        except Exception as e:
+            print("Error converting URL to path: {}".format(str(e)))
+            return url_or_path
+    
+    def _get_display_url(self, stored_url):
+        """Get the URL to display in the table based on user preference"""
+        try:
+            if self._show_full_urls_in_table:
+                return stored_url  # Show full URL
+            else:
+                return self._url_to_path(stored_url)  # Show only path
+        except Exception as e:
+            print("Error getting display URL: {}".format(str(e)))
+            return stored_url
+    
+    def _refresh_table_display(self):
+        """Refresh the table display based on current URL display setting"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return
+            
+            # Update each row in the table to reflect current display preference
+            for row in range(self._watch_table_model.getRowCount()):
+                # Get the stored URL (this should always be the full URL in our data)
+                stored_url = None
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    if row < len(self._data['watch_list_audit']):
+                        stored_url = self._data['watch_list_audit'][row].get('path', '')
+                
+                if stored_url:
+                    # Update the table display
+                    display_url = self._get_display_url(stored_url)
+                    self._watch_table_model.setValueAt(display_url, row, 0)
+            
+            # Also update the text area
+            self._sync_table_to_text()
+            
+        except Exception as e:
+            print("Error refreshing table display: {}".format(str(e)))
+    
     def _update_paths(self, event):
         """Update the path list from the text area"""
         try:
             text = self._path_textarea.getText()
-            new_path_list = [line.strip() for line in text.split('\n') if line.strip()]
+            raw_path_list = [line.strip() for line in text.split('\n') if line.strip()]
             
-            # Update watch_list_audit with new paths
+            if not raw_path_list:
+                # Clear the watch list if no paths provided
+                if not hasattr(self, '_data'):
+                    self._data = {}
+                self._data['watch_list_audit'] = []
+                
+                if hasattr(self, '_watch_table_model'):
+                    # Clear table
+                    while self._watch_table_model.getRowCount() > 0:
+                        self._watch_table_model.removeRow(0)
+                    self._save_watch_list_data()
+                
+                self._status_label.setText("Ready - 0 paths in watch list")
+                return
+            
+            # Validate and convert paths to full URLs if needed
+            validated_path_list = self._validate_and_convert_paths(raw_path_list)
+            
+            if not validated_path_list:
+                # User cancelled or validation failed
+                return
+            
+            # Update watch_list_audit with validated paths
             if not hasattr(self, '_data'):
                 self._data = {}
             
             # Create new watch list audit data
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
             self._data['watch_list_audit'] = []
-            for path in new_path_list:
+            for path in validated_path_list:
                 self._data['watch_list_audit'].append({
                     'path': path,
                     'manual_audited': False,
                     'scanned': False,
                     'last_audit': 'Never',
-                    'highlight': False
+                    'highlight': False,
+                    'note': ''
                 })
+            
+            # Update the text area with the validated full URLs
+            self._path_textarea.setText('\n'.join(validated_path_list))
             
             # Sync to table if it exists
             if hasattr(self, '_watch_table_model'):
@@ -2867,11 +3251,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 save_thread.start()
             
             # Update status
-            count = len(new_path_list)
+            count = len(validated_path_list)
             self._status_label.setText("Ready - {} path(s) in watch list".format(count))
             
             print("Watch list updated: {} paths loaded".format(count))
-            for path in new_path_list:
+            for path in validated_path_list:
                 print("  - {}".format(path))
             
         except Exception as e:
@@ -2968,48 +3352,86 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 content = f.read().strip()
             
             # Parse content based on file type
-            new_paths = []
+            raw_paths = []
             if file_path.lower().endswith('.json'):
                 try:
                     import json
                     data = json.loads(content)
                     if isinstance(data, list):
-                        new_paths = [str(item) for item in data]
+                        raw_paths = [str(item) for item in data]
                     elif isinstance(data, dict) and 'paths' in data:
-                        new_paths = [str(item) for item in data['paths']]
+                        raw_paths = [str(item) for item in data['paths']]
                     else:
                         # Try to extract strings from dict values
                         for value in data.values():
                             if isinstance(value, list):
-                                new_paths.extend([str(item) for item in value])
+                                raw_paths.extend([str(item) for item in value])
                             elif isinstance(value, str):
-                                new_paths.append(value)
+                                raw_paths.append(value)
                 except:
                     # Fallback to treating as text
-                    new_paths = [line.strip() for line in content.split('\n') if line.strip()]
+                    raw_paths = [line.strip() for line in content.split('\n') if line.strip()]
             else:
                 # Text file - one path per line
-                new_paths = [line.strip() for line in content.split('\n') if line.strip()]
+                raw_paths = [line.strip() for line in content.split('\n') if line.strip()]
             
-            if not new_paths:
+            if not raw_paths:
                 self._show_status_feedback("No valid paths found in file")
+                return
+            
+            # Validate and convert paths to full URLs if needed
+            validated_paths = self._validate_and_convert_paths(raw_paths)
+            
+            if not validated_paths:
+                # User cancelled or validation failed
                 return
             
             # Add paths to table with audit status
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
             imported_count = 0
             
-            # Get existing paths to avoid duplicates
-            existing_paths = set()
-            for row in range(self._watch_table_model.getRowCount()):
-                existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+            # Ensure internal data structure exists
+            if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                self._data = {'watch_list_audit': []}
             
-            for path in new_paths:
-                if path and path not in existing_paths:
-                    # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Highlight (False)]
-                    row_data = [path, False, False, "Never", False]
+            # Get existing paths to avoid duplicates (check both table and internal data)
+            existing_display_paths = set()
+            for row in range(self._watch_table_model.getRowCount()):
+                existing_display_paths.add(self._watch_table_model.getValueAt(row, 0))
+            
+            # Also check internal data for existing full URLs
+            existing_full_urls = set()
+            for item in self._data['watch_list_audit']:
+                if isinstance(item, dict):
+                    full_url = item.get('path', '')
+                    if full_url:
+                        existing_full_urls.add(full_url)
+                        # Add display version to existing paths too
+                        display_url = self._get_display_url(full_url)
+                        existing_display_paths.add(display_url)
+            
+            for path in validated_paths:
+                display_path = self._get_display_url(path)
+                if path and display_path not in existing_display_paths and path not in existing_full_urls:
+                    # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Note, Highlight (False)]
+                    row_data = [display_path, False, False, "Never", "", False]
                     self._watch_table_model.addRow(row_data)
+                    
+                    # CRITICAL FIX: Also add to internal data structure with full URL
+                    audit_item = {
+                        'path': path,  # Store full URL in internal data
+                        'manual_audited': False,
+                        'scanned': False,
+                        'last_audit': 'Never',
+                        'note': '',
+                        'highlight': False,
+                        'added': current_time,
+                        'source': 'file_import'
+                    }
+                    self._data['watch_list_audit'].append(audit_item)
+                    
                     imported_count += 1
+                    print("Added path to both table and internal data: {}".format(path))
             
             # Update text area to sync
             self._sync_table_to_text()
@@ -3132,7 +3554,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Target selection
             gbc.gridx = 0
             gbc.gridy = 0
-            dialog_panel.add(JLabel("Target Host:"), gbc)
+            dialog_panel.add(JLabel("Target URL:"), gbc)
             
             # Get available targets from sitemap
             available_targets = self._get_available_targets()
@@ -3236,17 +3658,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 request_info = self._helpers.analyzeRequest(message_info)
                                 url = request_info.getUrl()
                                 if url:
+                                    protocol = url.getProtocol()
                                     host = url.getHost()
                                     port = url.getPort()
                                     
-                                    # Create host:port format, but handle default ports
-                                    if port in [80, 443, -1]:
-                                        host_port = host
+                                    # Create full URL with schema
+                                    if (protocol == "https" and port == 443) or (protocol == "http" and port == 80) or port == -1:
+                                        # Use default ports - don't show port number
+                                        full_url = "{}://{}".format(protocol, host)
                                     else:
-                                        host_port = "{}:{}".format(host, port)
+                                        # Non-default ports - include port number
+                                        full_url = "{}://{}:{}".format(protocol, host, port)
                                     
-                                    targets.add(host_port)
-                                    print("Added target: {}".format(host_port))
+                                    targets.add(full_url)
+                                    print("Added target: {}".format(full_url))
                             except Exception as e:
                                 print("Error processing sitemap entry: {}".format(str(e)))
                                 continue
@@ -3264,17 +3689,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 request_info = self._helpers.analyzeRequest(message_info)
                                 url = request_info.getUrl()
                                 if url:
+                                    protocol = url.getProtocol()
                                     host = url.getHost()
                                     port = url.getPort()
                                     
-                                    # Create host:port format, but handle default ports
-                                    if port in [80, 443, -1]:
-                                        host_port = host
+                                    # Create full URL with schema
+                                    if (protocol == "https" and port == 443) or (protocol == "http" and port == 80) or port == -1:
+                                        # Use default ports - don't show port number
+                                        full_url = "{}://{}".format(protocol, host)
                                     else:
-                                        host_port = "{}:{}".format(host, port)
+                                        # Non-default ports - include port number
+                                        full_url = "{}://{}:{}".format(protocol, host, port)
                                     
-                                    targets.add(host_port)
-                                    print("Added proxy target: {}".format(host_port))
+                                    targets.add(full_url)
+                                    print("Added proxy target: {}".format(full_url))
                             except Exception as e:
                                 print("Error processing proxy entry: {}".format(str(e)))
                                 continue
@@ -3290,103 +3718,131 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _extract_sitemap_data(self, config):
         """Extract sitemap data for the specified target"""
         try:
-            target_host = config["target"]
-            print("Extracting sitemap data for target: {}".format(target_host))
+            target_url = config["target"]
+            print("Extracting sitemap data for target: {}".format(target_url))
             sitemap_data = []
             
-            # Parse target host and port
-            if ":" in target_host:
-                host, port_str = target_host.split(":", 1)
-                try:
-                    port = int(port_str)
-                except ValueError:
-                    print("Invalid port in target: {}".format(target_host))
-                    return []
+            # Parse the full URL (schema://host:port)
+            if target_url.startswith("http://") or target_url.startswith("https://"):
+                # Extract components from full URL
+                if target_url.startswith("https://"):
+                    protocol = "https"
+                    host_part = target_url[8:]  # Remove "https://"
+                    default_port = 443
+                else:
+                    protocol = "http"
+                    host_part = target_url[7:]   # Remove "http://"
+                    default_port = 80
+                
+                # Parse host and port
+                if ":" in host_part:
+                    host, port_str = host_part.split(":", 1)
+                    try:
+                        port = int(port_str)
+                    except ValueError:
+                        print("Invalid port in target URL: {}".format(target_url))
+                        return []
+                else:
+                    host = host_part
+                    port = default_port
             else:
-                host = target_host
-                port = -1
+                # Fallback for old format (hostname only) - preserve backward compatibility
+                if ":" in target_url:
+                    host, port_str = target_url.split(":", 1)
+                    try:
+                        port = int(port_str)
+                        # Guess protocol based on port
+                        protocol = "https" if port == 443 else "http"
+                    except ValueError:
+                        print("Invalid port in target: {}".format(target_url))
+                        return []
+                else:
+                    host = target_url
+                    port = -1
+                    protocol = "https"  # Default to HTTPS
             
-            print("Parsed target - Host: {}, Port: {}".format(host, port))
+            print("Parsed target - Protocol: {}, Host: {}, Port: {}".format(protocol, host, port))
             
             # Get sitemap entries for the target
             if hasattr(self._callbacks, 'getSiteMap'):
-                # Build URL pattern for the target - try both HTTP and HTTPS
-                url_patterns = []
-                if port == 443:
-                    url_patterns.append("https://{}".format(host))
-                elif port == 80:
-                    url_patterns.append("http://{}".format(host))
-                elif port == -1:
-                    # Try both HTTP and HTTPS for default ports
-                    url_patterns.append("http://{}".format(host))
-                    url_patterns.append("https://{}".format(host))
+                # Build URL pattern for the exact target
+                if port in [80, 443] or port == -1:
+                    # Use protocol-specific default port handling
+                    if protocol == "https" and (port == 443 or port == -1):
+                        base_url = "https://{}".format(host)
+                    elif protocol == "http" and (port == 80 or port == -1):
+                        base_url = "http://{}".format(host)
+                    else:
+                        # Mixed protocol/port - try both
+                        base_url = "{}://{}".format(protocol, host)
                 else:
-                    # Try both protocols with custom port
-                    url_patterns.append("http://{}:{}".format(host, port))
-                    url_patterns.append("https://{}:{}".format(host, port))
+                    # Custom port
+                    base_url = "{}://{}:{}".format(protocol, host, port)
                 
-                print("Trying URL patterns: {}".format(url_patterns))
+                print("Getting sitemap for: {}".format(base_url))
                 
-                for base_url in url_patterns:
-                    try:
-                        print("Getting sitemap for: {}".format(base_url))
-                        site_map = self._callbacks.getSiteMap(base_url)
+                try:
+                    site_map = self._callbacks.getSiteMap(base_url)
+                    
+                    if site_map:
+                        print("Found {} entries for {}".format(len(site_map), base_url))
                         
-                        if site_map:
-                            print("Found {} entries for {}".format(len(site_map), base_url))
-                            
-                            for message_info in site_map:
-                                if message_info:
-                                    try:
-                                        request_info = self._helpers.analyzeRequest(message_info)
-                                        url = request_info.getUrl()
-                                        
-                                        if url and url.getHost() == host:
-                                            # Check port matching
-                                            url_port = url.getPort()
-                                            port_matches = False
-                                            
-                                            if port == -1:
-                                                # Accept any default port
-                                                port_matches = url_port in [80, 443, -1]
-                                            else:
-                                                # Exact port match
-                                                port_matches = (url_port == port)
-                                            
-                                            if port_matches:
-                                                response = message_info.getResponse()
-                                                status_code = 200  # Default
-                                                
-                                                if response:
-                                                    try:
-                                                        response_info = self._helpers.analyzeResponse(response)
-                                                        status_code = response_info.getStatusCode()
-                                                    except:
-                                                        pass
-                                                
-                                                entry = {
-                                                    "url": url,
-                                                    "method": request_info.getMethod(),
-                                                    "path": url.getPath() if url.getPath() else "/",
-                                                    "status_code": status_code,
-                                                    "response": response,  # Include response for MIME type checking
-                                                    "message_info": message_info
-                                                }
-                                                
-                                                sitemap_data.append(entry)
-                                                print("Added entry: {} {} (status: {})".format(entry["method"], entry["path"], status_code))
+                        for message_info in site_map:
+                            if message_info:
+                                try:
+                                    request_info = self._helpers.analyzeRequest(message_info)
+                                    url = request_info.getUrl()
                                     
-                                    except Exception as e:
-                                        print("Error processing message: {}".format(str(e)))
-                                        continue
-                        else:
-                            print("No sitemap entries found for: {}".format(base_url))
-                            
-                    except Exception as e:
-                        print("Error getting sitemap for {}: {}".format(base_url, str(e)))
-                        continue
+                                    if url and url.getHost() == host:
+                                        # Check protocol and port matching
+                                        url_protocol = url.getProtocol()
+                                        url_port = url.getPort()
+                                        
+                                        protocol_matches = (url_protocol == protocol)
+                                        port_matches = False
+                                        
+                                        if port == -1:
+                                            # Accept default ports for the protocol
+                                            if protocol == "https":
+                                                port_matches = url_port in [443, -1]
+                                            else:  # http
+                                                port_matches = url_port in [80, -1]
+                                        else:
+                                            # Exact port match
+                                            port_matches = (url_port == port)
+                                        
+                                        if protocol_matches and port_matches:
+                                            response = message_info.getResponse()
+                                            status_code = 200  # Default
+                                            
+                                            if response:
+                                                try:
+                                                    response_info = self._helpers.analyzeResponse(response)
+                                                    status_code = response_info.getStatusCode()
+                                                except:
+                                                    pass
+                                            
+                                            entry = {
+                                                "url": url,
+                                                "method": request_info.getMethod(),
+                                                "path": url.getPath() if url.getPath() else "/",
+                                                "status_code": status_code,
+                                                "response": response,  # Include response for MIME type checking
+                                                "message_info": message_info
+                                            }
+                                            
+                                            sitemap_data.append(entry)
+                                            
+                                except Exception as e:
+                                    print("Error processing sitemap entry: {}".format(str(e)))
+                                    continue
+                    else:
+                        print("No sitemap entries found for {}".format(base_url))
+                        
+                except Exception as e:
+                    print("Error getting sitemap for {}: {}".format(base_url, str(e)))
             
-            print("Total extracted {} entries from sitemap for target {}".format(len(sitemap_data), target_host))
+            print("Total extracted {} entries from sitemap for target {}".format(len(sitemap_data), target_url))
             return sitemap_data
             
         except Exception as e:
@@ -3416,31 +3872,37 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Remove query parameters for uniqueness
                 clean_path = path.split("?")[0] if "?" in path else path
                 
-                print("DEBUG: Processing entry: {} (status: {})".format(clean_path, status_code))
+                # Create full URL from the URL object
+                full_url = str(url)
+                # Remove query parameters from full URL for uniqueness 
+                if "?" in full_url:
+                    full_url = full_url.split("?")[0]
+                
+                print("DEBUG: Processing entry: {} (status: {})".format(full_url, status_code))
                 
                 # Check status code exclusion
                 if status_code in exclude_status_codes:
-                    print("DEBUG: Excluding {} due to status code {}".format(clean_path, status_code))
+                    print("DEBUG: Excluding {} due to status code {}".format(full_url, status_code))
                     continue
                 
-                # Check file extension exclusion
+                # Check file extension exclusion (check against path only)
                 if self._has_excluded_extension(clean_path, exclude_extensions):
-                    print("DEBUG: Excluding {} due to file extension".format(clean_path))
+                    print("DEBUG: Excluding {} due to file extension".format(full_url))
                     continue
                 
-                # Check pattern exclusion
+                # Check pattern exclusion (check against path only)
                 if self._matches_exclude_pattern(clean_path, exclude_patterns):
-                    print("DEBUG: Excluding {} due to path pattern".format(clean_path))
+                    print("DEBUG: Excluding {} due to path pattern".format(full_url))
                     continue
                 
                 # Check MIME type exclusion
                 if self._has_excluded_mime_type(response, exclude_mime_types):
-                    print("DEBUG: Excluding {} due to MIME type".format(clean_path))
+                    print("DEBUG: Excluding {} due to MIME type".format(full_url))
                     continue
                 
-                # Add to filtered set (ensures uniqueness)
-                filtered_endpoints.add(clean_path)
-                print("DEBUG: Including {} in filtered results".format(clean_path))
+                # Add to filtered set (ensures uniqueness) - store full URL now
+                filtered_endpoints.add(full_url)
+                print("DEBUG: Including {} in filtered results".format(full_url))
             
             print("Filtered {} unique endpoints from {} total entries".format(len(filtered_endpoints), len(sitemap_data)))
             return list(filtered_endpoints)
@@ -3655,18 +4117,51 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if not hasattr(self, '_watch_table_model'):
                 return 0
             
-            # Get existing paths to avoid duplicates
+            # Ensure internal data structure exists
+            if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                self._data = {'watch_list_audit': []}
+            
+            # Get existing paths to avoid duplicates (check both table and internal data)
             existing_paths = set()
             for row in range(self._watch_table_model.getRowCount()):
                 existing_paths.add(self._watch_table_model.getValueAt(row, 0))
             
+            # Also check internal data for existing full URLs
+            existing_full_urls = set()
+            for item in self._data['watch_list_audit']:
+                if isinstance(item, dict):
+                    full_url = item.get('path', '')
+                    if full_url:
+                        existing_full_urls.add(full_url)
+                        # Add display version to existing paths too
+                        display_url = self._get_display_url(full_url)
+                        existing_paths.add(display_url)
+            
             imported_count = 0
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
             for endpoint in endpoints:
-                if endpoint and endpoint not in existing_paths:
+                display_endpoint = self._get_display_url(endpoint)
+                if endpoint and display_endpoint not in existing_paths and endpoint not in existing_full_urls:
                     # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Highlight (False)]
-                    row_data = [endpoint, False, False, "Never", False]
+                    row_data = [display_endpoint, False, False, "Never", False]
                     self._watch_table_model.addRow(row_data)
+                    
+                    # CRITICAL FIX: Also add to internal data structure with full URL
+                    audit_item = {
+                        'path': endpoint,  # Store full URL in internal data
+                        'manual_audited': False,
+                        'scanned': False,
+                        'last_audit': 'Never',
+                        'note': '',
+                        'highlight': False,
+                        'added': current_time,
+                        'source': 'sitemap'
+                    }
+                    self._data['watch_list_audit'].append(audit_item)
+                    
                     imported_count += 1
+                    print("Added endpoint to both table and internal data: {}".format(endpoint))
             
             # Update text area to sync
             self._sync_table_to_text()
@@ -3798,34 +4293,69 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if not self._sitemap_config:
                 return 0
             
-            target_host = self._sitemap_config["target"]
+            target_url = self._sitemap_config["target"]
             
-            # Parse target host and port
-            if ":" in target_host:
-                host, port_str = target_host.split(":", 1)
-                port = int(port_str)
+            # Parse the full URL (schema://host:port) - same logic as _extract_sitemap_data
+            if target_url.startswith("http://") or target_url.startswith("https://"):
+                # Extract components from full URL
+                if target_url.startswith("https://"):
+                    protocol = "https"
+                    host_part = target_url[8:]  # Remove "https://"
+                    default_port = 443
+                else:
+                    protocol = "http"
+                    host_part = target_url[7:]   # Remove "http://"
+                    default_port = 80
+                
+                # Parse host and port
+                if ":" in host_part:
+                    host, port_str = host_part.split(":", 1)
+                    try:
+                        port = int(port_str)
+                    except ValueError:
+                        print("Invalid port in target URL: {}".format(target_url))
+                        return 0
+                else:
+                    host = host_part
+                    port = default_port
             else:
-                host = target_host
-                port = 443 if target_host.startswith("https") else 80
+                # Fallback for old format (hostname only) - preserve backward compatibility
+                if ":" in target_url:
+                    host, port_str = target_url.split(":", 1)
+                    try:
+                        port = int(port_str)
+                        protocol = "https" if port == 443 else "http"
+                    except ValueError:
+                        print("Invalid port in target: {}".format(target_url))
+                        return 0
+                else:
+                    host = target_url
+                    port = 443
+                    protocol = "https"
             
             sitemap_size = 0
             
-            # Quick count of sitemap entries for the target
+            # Quick count of sitemap entries for the exact target
             if hasattr(self._callbacks, 'getSiteMap'):
-                url_patterns = [
-                    "https://{}:{}".format(host, port),
-                    "http://{}:{}".format(host, port),
-                    "https://{}".format(host),
-                    "http://{}".format(host)
-                ]
+                # Build URL pattern for the exact target
+                if port in [80, 443]:
+                    # Use protocol-specific default port handling
+                    if protocol == "https" and port == 443:
+                        base_url = "https://{}".format(host)
+                    elif protocol == "http" and port == 80:
+                        base_url = "http://{}".format(host)
+                    else:
+                        base_url = "{}://{}".format(protocol, host)
+                else:
+                    # Custom port
+                    base_url = "{}://{}:{}".format(protocol, host, port)
                 
-                for base_url in url_patterns:
-                    try:
-                        sitemap_entries = self._callbacks.getSiteMap(base_url)
-                        if sitemap_entries:
-                            sitemap_size += len(sitemap_entries)
-                    except:
-                        continue
+                try:
+                    sitemap_entries = self._callbacks.getSiteMap(base_url)
+                    if sitemap_entries:
+                        sitemap_size = len(sitemap_entries)
+                except Exception as e:
+                    print("Error getting sitemap for {}: {}".format(base_url, str(e)))
             
             return sitemap_size
             
@@ -3864,14 +4394,28 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Check for new endpoints efficiently
             new_endpoints = []
             if hasattr(self, '_watch_table_model'):
-                # Build existing paths set for O(1) lookups
-                existing_paths = set()
+                # Build existing paths set for O(1) lookups (check both display and full URLs)
+                existing_display_paths = set()
+                existing_full_urls = set()
+                
                 for row in range(self._watch_table_model.getRowCount()):
-                    existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+                    existing_display_paths.add(self._watch_table_model.getValueAt(row, 0))
+                
+                # Also check internal data for existing full URLs
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict):
+                            full_url = item.get('path', '')
+                            if full_url:
+                                existing_full_urls.add(full_url)
+                                # Add display version too
+                                display_url = self._get_display_url(full_url)
+                                existing_display_paths.add(display_url)
                 
                 # Find new endpoints
                 for endpoint in filtered_endpoints:
-                    if endpoint not in existing_paths:
+                    display_endpoint = self._get_display_url(endpoint)
+                    if endpoint not in existing_full_urls and display_endpoint not in existing_display_paths:
                         new_endpoints.append(endpoint)
             
             # Add new endpoints if any
@@ -3879,9 +4423,28 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 print("DEBUG: Adding {} new endpoints".format(len(new_endpoints)))
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
                 
+                # Ensure internal data structure exists
+                if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                    self._data = {'watch_list_audit': []}
+                
                 for endpoint in new_endpoints:
-                    row_data = [endpoint, False, False, "Never", False]
+                    display_endpoint = self._get_display_url(endpoint)
+                    row_data = [display_endpoint, False, False, "Never", False]
                     self._watch_table_model.addRow(row_data)
+                    
+                    # CRITICAL FIX: Also add to internal data structure with full URL
+                    audit_item = {
+                        'path': endpoint,  # Store full URL in internal data
+                        'manual_audited': False,
+                        'scanned': False,
+                        'last_audit': 'Never',
+                        'note': '',
+                        'highlight': False,
+                        'added': current_time,
+                        'source': 'sitemap_auto'
+                    }
+                    self._data['watch_list_audit'].append(audit_item)
+                    print("Auto-added endpoint to both table and internal data: {}".format(endpoint))
                 
                 # Update UI and save
                 self._sync_table_to_text()
@@ -3920,10 +4483,30 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             selected_file = file_chooser.getSelectedFile()
             file_path = selected_file.getAbsolutePath()
             
-            # Prepare data
+            # Prepare data - export from internal storage to preserve full URLs
             export_data = []
-            if hasattr(self, '_watch_table_model'):
-                # Export from table if available
+            if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                # Export from internal storage (always contains full URLs)
+                for item in self._data['watch_list_audit']:
+                    if isinstance(item, dict):
+                        path = item.get('path', '')  # This is always a full URL
+                        audited = item.get('manual_audited', False) or item.get('scanned', False)
+                        last_audit = item.get('last_audit', 'Never')
+                        
+                        if file_path.lower().endswith('.json'):
+                            export_data.append({
+                                'path': path,
+                                'audited': audited,
+                                'last_audit': last_audit,
+                                'note': item.get('note', ''),
+                                'highlight': item.get('highlight', False)
+                            })
+                        else:
+                            # Text format - just full URLs
+                            export_data.append(path)
+            elif hasattr(self, '_watch_table_model') and self._watch_table_model.getRowCount() > 0:
+                # Fallback: export from table if no internal data (shouldn't normally happen)
+                print("Warning: Exporting from table display instead of internal storage")
                 for row in range(self._watch_table_model.getRowCount()):
                     path = self._watch_table_model.getValueAt(row, 0)
                     audited = self._watch_table_model.getValueAt(row, 1)
@@ -4016,7 +4599,25 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             auto_audit_scanner_checkbox = JCheckBox("Auto-mark as audited when accessed from Scanner", self._auto_audit_scanner_enabled)
             auto_audit_panel.add(auto_audit_scanner_checkbox, gbc)
             
-            config_tabs.addTab("Auto-Audit", auto_audit_panel)
+            # Table view section separator
+            gbc.gridy = 4
+            gbc.gridwidth = 2
+            table_view_separator = JLabel("Table View Settings")
+            table_view_separator.setFont(table_view_separator.getFont().deriveFont(14.0))
+            auto_audit_panel.add(table_view_separator, gbc)
+            
+            # Table view description
+            gbc.gridy = 5
+            table_view_desc = JLabel("Configure how URLs are displayed in the watch list table")
+            auto_audit_panel.add(table_view_desc, gbc)
+            
+            # Show full URLs checkbox
+            gbc.gridy = 6
+            gbc.gridwidth = 1
+            show_full_urls_checkbox = JCheckBox("Show full URLs in table (uncheck to show paths only)", self._show_full_urls_in_table)
+            auto_audit_panel.add(show_full_urls_checkbox, gbc)
+            
+            config_tabs.addTab("Watch List", auto_audit_panel)
             
             # === SITEMAP SETTINGS TAB ===
             sitemap_panel = JPanel(GridBagLayout())
@@ -4043,7 +4644,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             gbc.gridwidth = 1
             gbc.weightx = 0.0  # Label doesn't expand
             gbc.fill = GridBagConstraints.NONE
-            sitemap_panel.add(JLabel("Target Host:"), gbc)
+            sitemap_panel.add(JLabel("Target URL:"), gbc)
             
             # Get available targets from sitemap
             available_targets = self._get_available_targets()
@@ -4461,8 +5062,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             button_panel = JPanel()
             button_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))  # Add padding
             
-            # Apply Auto-Audit Settings button
-            apply_btn = JButton("Apply Auto-Audit Settings")
+            # Apply Watch List Settings button
+            apply_btn = JButton("Apply Watch List Settings")
             def apply_settings(e):
                 try:
                     dialog_status_label.setText(" ")  # Clear previous status
@@ -4471,6 +5072,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     self._auto_audit_repeater_enabled = auto_audit_repeater_checkbox.isSelected()
                     self._auto_audit_scanner_enabled = auto_audit_scanner_checkbox.isSelected()
                     
+                    # Update table view setting
+                    old_show_full_urls = self._show_full_urls_in_table
+                    self._show_full_urls_in_table = show_full_urls_checkbox.isSelected()
+                    
                     # Save settings to data file
                     data = self._load_data_from_file()
                     if "settings" not in data:
@@ -4478,13 +5083,18 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     
                     data["settings"]["auto_audit_repeater_enabled"] = self._auto_audit_repeater_enabled
                     data["settings"]["auto_audit_scanner_enabled"] = self._auto_audit_scanner_enabled
+                    data["settings"]["show_full_urls_in_table"] = self._show_full_urls_in_table
                     
                     self._save_data_to_file(data)
                     
                     # Update cached data to stay in sync
                     self._data = data
                     
-                    dialog_status_label.setText("Auto-audit settings applied successfully")
+                    # Refresh table display if the setting changed
+                    if old_show_full_urls != self._show_full_urls_in_table:
+                        self._refresh_table_display()
+                    
+                    dialog_status_label.setText("Watch list settings applied successfully")
                     
                 except Exception as ex:
                     error_msg = "Error applying settings: {}".format(str(ex))
@@ -4555,16 +5165,54 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             path = path.strip()
             
-            # Check for duplicates in table
+            # Validate and convert path if needed
+            validated_paths = self._validate_and_convert_paths([path])
+            
+            if not validated_paths:
+                # User cancelled or validation failed
+                return
+            
+            final_path = validated_paths[0]
+            
+            # Check for duplicates in table and internal data
             if hasattr(self, '_watch_table_model'):
+                display_path = self._get_display_url(final_path)
+                
+                # Check table for display path duplicates
                 for row in range(self._watch_table_model.getRowCount()):
-                    if self._watch_table_model.getValueAt(row, 0) == path:
+                    if self._watch_table_model.getValueAt(row, 0) == display_path:
                         self._show_status_feedback("Path already exists in watch list")
                         return
                 
+                # Also check internal data for full URL duplicates
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict) and item.get('path', '') == final_path:
+                            self._show_status_feedback("Path already exists in watch list")
+                            return
+                
+                # Ensure internal data structure exists
+                if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                    self._data = {'watch_list_audit': []}
+                
                 # Add to table
-                row_data = [path, False, False, "Never", False]  # Added False for highlight column
+                row_data = [display_path, False, False, "Never", "", False]  # Added empty note and False for highlight column
                 self._watch_table_model.addRow(row_data)
+                
+                # CRITICAL FIX: Also add to internal data structure with full URL
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                audit_item = {
+                    'path': final_path,  # Store full URL in internal data
+                    'manual_audited': False,
+                    'scanned': False,
+                    'last_audit': 'Never',
+                    'note': '',
+                    'highlight': False,
+                    'added': current_time,
+                    'source': 'manual_add'
+                }
+                self._data['watch_list_audit'].append(audit_item)
+                print("Added single path to both table and internal data: {}".format(final_path))
                 
                 # Sync to text area
                 self._sync_table_to_text()
@@ -4629,6 +5277,72 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             self._show_status_feedback("Error removing path: {}".format(str(e)))
             print("Remove path error: {}".format(str(e)))
     
+    def _edit_note_for_row(self, row_index):
+        """Edit the note for a specific row in the watch list table"""
+        try:
+            if not hasattr(self, '_watch_table_model') or row_index < 0 or row_index >= self._watch_table_model.getRowCount():
+                return
+                
+            # Get current note
+            current_note = ""
+            if self._watch_table_model.getColumnCount() > 4:
+                current_note = self._watch_table_model.getValueAt(row_index, 4) or ""
+            
+            # Get the path for context
+            path = self._watch_table_model.getValueAt(row_index, 0)
+            
+            # Show input dialog for note
+            from javax.swing import JOptionPane, JScrollPane, JTextArea
+            from java.awt import Dimension
+            
+            # Create a text area for multi-line notes
+            text_area = JTextArea(current_note, 5, 40)
+            text_area.setLineWrap(True)
+            text_area.setWrapStyleWord(True)
+            scroll_pane = JScrollPane(text_area)
+            scroll_pane.setPreferredSize(Dimension(400, 120))
+            
+            result = JOptionPane.showConfirmDialog(
+                None,
+                scroll_pane,
+                "Edit Note for: {}".format(path),
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.PLAIN_MESSAGE
+            )
+            
+            if result == JOptionPane.OK_OPTION:
+                new_note = text_area.getText().strip()
+                
+                # Update the table model
+                self._watch_table_model.setValueAt(new_note, row_index, 4)
+                
+                # Save the updated data
+                self._save_watch_list_data()
+                
+                self._show_status_feedback("Note updated for {}".format(path))
+                
+        except Exception as e:
+            self._show_status_feedback("Error editing note: {}".format(str(e)))
+            print("Edit note error: {}".format(str(e)))
+    
+    def _edit_note_for_selected(self, event):
+        """Edit note for the currently selected row (button handler)"""
+        try:
+            if not hasattr(self, '_watch_table'):
+                self._show_status_feedback("Table not available")
+                return
+                
+            selected_row = self._watch_table.getSelectedRow()
+            if selected_row == -1:
+                self._show_status_feedback("Please select a path to edit its note")
+                return
+            
+            self._edit_note_for_row(selected_row)
+            
+        except Exception as e:
+            self._show_status_feedback("Error editing note: {}".format(str(e)))
+            print("Edit note button error: {}".format(str(e)))
+    
     def _mark_all_audited(self, event):
         """Mark all paths as audited"""
         try:
@@ -4685,8 +5399,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if hasattr(self, '_path_textarea'):
                     self._path_textarea.setText("")
                 
-                # Save empty data
-                self._save_watch_list_data()
+                # Clear internal data directly (don't use _save_watch_list_data which reads from table)
+                if hasattr(self, '_data'):
+                    self._data['watch_list_audit'] = []
+                    self._save_data_to_file(self._data)
                 
                 # Update status
                 self._status_label.setText("Ready - 0 paths in watch list")
@@ -4704,12 +5420,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         """Sync table data to text area"""
         try:
             if hasattr(self, '_watch_table_model') and hasattr(self, '_path_textarea'):
-                paths = []
-                for row in range(self._watch_table_model.getRowCount()):
-                    path = self._watch_table_model.getValueAt(row, 0)
-                    paths.append(path)
+                # Get the full URLs from the internal data structure
+                full_urls = []
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict):
+                            full_urls.append(item.get('path', ''))
                 
-                self._path_textarea.setText('\n'.join(paths))
+                self._path_textarea.setText('\n'.join(full_urls))
             
         except Exception as e:
             print("Error syncing table to text: {}".format(str(e)))
@@ -4727,30 +5445,51 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             new_paths = [line.strip() for line in text_content.split('\n') if line.strip()]
             
-            # Get existing paths from table
+            # Get existing data from internal structure
             existing_data = {}
-            for row in range(self._watch_table_model.getRowCount()):
-                path = self._watch_table_model.getValueAt(row, 0)
-                manual_audited = self._watch_table_model.getValueAt(row, 1)
-                scanned = self._watch_table_model.getValueAt(row, 2)
-                last_audit = self._watch_table_model.getValueAt(row, 3)
-                highlight = self._watch_table_model.getValueAt(row, 4)
-                existing_data[path] = (manual_audited, scanned, last_audit, highlight)
+            if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                for item in self._data['watch_list_audit']:
+                    if isinstance(item, dict):
+                        path = item.get('path', '')
+                        manual_audited = item.get('manual_audited', False)
+                        scanned = item.get('scanned', False)
+                        last_audit = item.get('last_audit', 'Never')
+                        note = item.get('note', '')
+                        highlight = item.get('highlight', False)
+                        existing_data[path] = (manual_audited, scanned, last_audit, note, highlight)
             
-            # Clear table
+            # Clear table and internal data
             self._watch_table_model.setRowCount(0)
+            if hasattr(self, '_data'):
+                self._data['watch_list_audit'] = []
             
             # Re-add paths, preserving audit status and dates
             for path in new_paths:
+                # Use display format for the table
+                display_path = self._get_display_url(path)
+                
                 if path in existing_data:
                     # Preserve existing data
-                    manual_audited, scanned, last_audit, highlight = existing_data[path]
-                    row_data = [path, manual_audited, scanned, last_audit, highlight]
+                    manual_audited, scanned, last_audit, note, highlight = existing_data[path]
+                    row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
                 else:
                     # New path
-                    row_data = [path, False, False, "Never", False]
+                    manual_audited, scanned, last_audit, note, highlight = False, False, "Never", "", False
+                    row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
                 
+                # Add to table
                 self._watch_table_model.addRow(row_data)
+                
+                # Add to internal data structure (full URL)
+                if hasattr(self, '_data'):
+                    self._data['watch_list_audit'].append({
+                        'path': path,  # Store full URL in internal data
+                        'manual_audited': manual_audited,
+                        'scanned': scanned,
+                        'last_audit': last_audit,
+                        'note': note,
+                        'highlight': highlight
+                    })
             
         except Exception as e:
             print("Error syncing text to table: {}".format(str(e)))
@@ -4762,31 +5501,36 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 print("No current project to save watch list data")
                 return
             
-            # Prepare data to save
-            watch_data = []
-            if hasattr(self, '_watch_table_model'):
-                for row in range(self._watch_table_model.getRowCount()):
-                    path = self._watch_table_model.getValueAt(row, 0)
-                    manual_audited = self._watch_table_model.getValueAt(row, 1)
-                    scanned = self._watch_table_model.getValueAt(row, 2)
-                    last_audit = self._watch_table_model.getValueAt(row, 3)
-                    highlight = self._watch_table_model.getValueAt(row, 4)
-                    
-                    watch_data.append({
-                        'path': path,
-                        'manual_audited': manual_audited,
-                        'scanned': scanned,
-                        'last_audit': last_audit,
-                        'highlight': highlight
-                    })
-            
-            # Save to current project data
-            if hasattr(self, '_data'):
-                self._data['watch_list_audit'] = watch_data
+            # Update audit status in existing internal data (preserving full URLs)
+            if hasattr(self, '_watch_table_model') and hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                # Make sure we have the same number of rows in table and internal data
+                table_rows = self._watch_table_model.getRowCount()
+                internal_items = len(self._data['watch_list_audit'])
+                
+                if table_rows == internal_items:
+                    # Update audit status for each item, preserving the full URL
+                    for row in range(table_rows):
+                        manual_audited = self._watch_table_model.getValueAt(row, 1)
+                        scanned = self._watch_table_model.getValueAt(row, 2)
+                        last_audit = self._watch_table_model.getValueAt(row, 3)
+                        note = self._watch_table_model.getValueAt(row, 4) if self._watch_table_model.getColumnCount() > 4 else ""
+                        highlight = self._watch_table_model.getValueAt(row, 5) if self._watch_table_model.getColumnCount() > 5 else False
+                        
+                        # Update only the audit status, keep the original full URL
+                        if row < len(self._data['watch_list_audit']):
+                            self._data['watch_list_audit'][row]['manual_audited'] = manual_audited
+                            self._data['watch_list_audit'][row]['scanned'] = scanned
+                            self._data['watch_list_audit'][row]['last_audit'] = last_audit
+                            self._data['watch_list_audit'][row]['note'] = note
+                            self._data['watch_list_audit'][row]['highlight'] = highlight
+                            # DO NOT update the 'path' field - it should always remain a full URL
+                else:
+                    print("Warning: Table rows ({}) and internal data ({}) count mismatch - skipping save".format(table_rows, internal_items))
+                    return
                 
                 # Save to file using the correct method
                 self._save_data_to_file(self._data)
-                print("Saved {} watch list items with audit status".format(len(watch_data)))
+                print("Updated audit status for {} watch list items (URLs preserved)".format(table_rows))
             
         except Exception as e:
             print("Error saving watch list data: {}".format(str(e)))
@@ -4827,11 +5571,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Check if this request matches any of our paths
             if self._matches_watchlist(path, full_url):
                 # Check if highlighting is enabled for matching paths
-                if toolFlag in [self._callbacks.TOOL_PROXY, self._callbacks.TOOL_SPIDER, self._callbacks.TOOL_SCANNER]:
+                # Allow highlighting for most tools (exclude only Burp extensions themselves)
+                excluded_tools = [self._callbacks.TOOL_EXTENDER]
+                if toolFlag not in excluded_tools:
                     if self._should_highlight_path(path, full_url):
                         messageInfo.setHighlight("red")
-                        messageInfo.setComment("Request found")
-                        print("Highlighted request: {}".format(full_url))
+                        
+                        # Get the note for this path and include it in the comment
+                        note = self._get_note_for_path(path, full_url)
+                        if note:
+                            messageInfo.setComment("Vuln Tracker: {} | Note: {}".format(path, note))
+                        else:
+                            messageInfo.setComment("Vuln Tracker: {}".format(path))
+                        
+                        print("Highlighted request: {} with note: '{}'".format(full_url, note))
                 
                 # Auto-mark as audited if request comes from Repeater
                 if toolFlag == self._callbacks.TOOL_REPEATER and self._auto_audit_repeater_enabled:
@@ -4982,10 +5735,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Check each row in the table to see if highlighting is enabled for matching paths
             for row in range(self._watch_table_model.getRowCount()):
                 table_path = self._watch_table_model.getValueAt(row, 0)
-                highlight_enabled = self._watch_table_model.getValueAt(row, 4)  # Highlight column
+                highlight_enabled = self._watch_table_model.getValueAt(row, 5)  # Highlight column is now at position 5
                 
                 # Check if this table entry matches the current request and highlighting is enabled
                 if highlight_enabled and self._is_match(table_path, path, full_url):
+                    print("Highlighting enabled for path: {} (pattern: {})".format(path, table_path))
                     return True
             
             return False
@@ -4993,6 +5747,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         except Exception as e:
             print("Error checking highlight status: {}".format(str(e)))
             return False
+    
+    def _get_note_for_path(self, path, full_url):
+        """Get the note for a matching path in the watch list"""
+        try:
+            if hasattr(self, '_watch_table_model'):
+                for row in range(self._watch_table_model.getRowCount()):
+                    table_path = self._watch_table_model.getValueAt(row, 0)
+                    if self._is_match(table_path, path, full_url):
+                        note = self._watch_table_model.getValueAt(row, 4)  # Note column
+                        return note if note else ""
+            return ""
+        except Exception as e:
+            print("Error getting note for path: {}".format(str(e)))
+            return ""
     
     def _matches_watchlist(self, path, full_url):
         """Check if the path/URL matches any item in our watch list"""
@@ -5060,17 +5828,17 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             request_info = self._helpers.analyzeRequest(message)
             url = request_info.getUrl()
-            path = url.getPath()
+            full_url = str(url)  # Get the full URL instead of just the path
             
             # Use SwingUtilities to ensure UI updates happen on Event Dispatch Thread
             def update_ui():
                 try:
-                    # Add to text area
+                    # Add to text area (use full URL now)
                     current_text = self._path_textarea.getText()
                     if current_text:
-                        new_text = current_text + '\n' + path
+                        new_text = current_text + '\n' + full_url
                     else:
-                        new_text = path
+                        new_text = full_url
                     
                     self._path_textarea.setText(new_text)
                     self._update_paths(None)
@@ -5498,6 +6266,28 @@ class CWEMessageEditorTab(IMessageEditorTab):
         
         top_panel.add(cwe_panel)
         
+        # Note panel
+        note_panel = JPanel(BorderLayout())
+        note_panel.add(JLabel("Note for this request:"), BorderLayout.NORTH)
+        
+        # Note text area
+        self._note_textarea = JTextArea(3, 50)
+        self._note_textarea.setLineWrap(True)
+        self._note_textarea.setWrapStyleWord(True)
+        self._note_textarea.setBorder(BorderFactory.createEtchedBorder())
+        note_scroll = JScrollPane(self._note_textarea)
+        note_panel.add(note_scroll, BorderLayout.CENTER)
+        
+        # Note button panel
+        note_button_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        self._save_note_button = JButton("Save Note", actionPerformed=self._save_note)
+        self._clear_note_button = JButton("Clear Note", actionPerformed=self._clear_note)
+        note_button_panel.add(self._save_note_button)
+        note_button_panel.add(self._clear_note_button)
+        note_panel.add(note_button_panel, BorderLayout.SOUTH)
+        
+        top_panel.add(note_panel)
+        
         self._component.add(top_panel, BorderLayout.NORTH)
         
         # Center panel for existing vulnerabilities
@@ -5675,6 +6465,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
             self._request_info_label.setText("No request selected")
             self._clear_vulnerabilities_table()
             self._stats_label.setText("No vulnerabilities for this request")
+            self._note_textarea.setText("")  # Clear note when no request selected
             return
         
         try:
@@ -5696,10 +6487,14 @@ class CWEMessageEditorTab(IMessageEditorTab):
             # Update vulnerabilities table for this request
             self._update_vulnerabilities_table(url, method)
             
+            # Load note for this request
+            self._load_note_for_current_request()
+            
         except Exception as e:
             print("Error updating UI for request: {}".format(str(e)))
             self._request_info_label.setText("Error analyzing request")
             self._clear_vulnerabilities_table()
+            self._note_textarea.setText("")
     
     def _update_vulnerabilities_table(self, url, method):
         """Update the vulnerabilities table for the current request"""
@@ -5908,6 +6703,172 @@ class CWEMessageEditorTab(IMessageEditorTab):
             
         except Exception as e:
             print("Error removing vulnerability from CWE tab: {}".format(str(e)))
+    
+    def _update_table_note_for_path(self, path, note):
+        """Update the note column in the watch table for a specific path"""
+        try:
+            if not hasattr(self._extender, '_watch_table_model'):
+                return False
+            
+            # Convert full URL to display format for table lookup
+            display_path = self._extender._get_display_url(path)
+            
+            table_model = self._extender._watch_table_model
+            for row in range(table_model.getRowCount()):
+                table_path = table_model.getValueAt(row, 0)  # Path column
+                if table_path == display_path:
+                    table_model.setValueAt(note, row, 4)  # Note column
+                    print("Updated table note for path {}: '{}'".format(display_path, note))
+                    return True
+            
+            return False  # Path not found in table
+            
+        except Exception as e:
+            print("Error updating table note: {}".format(str(e)))
+            return False
+    
+    def _add_path_to_table(self, path, note):
+        """Add a new path with note to the watch table"""
+        try:
+            if not hasattr(self._extender, '_watch_table_model'):
+                return False
+            
+            # Convert full URL to display format for table
+            display_path = self._extender._get_display_url(path)
+            
+            table_model = self._extender._watch_table_model
+            # Add new row: [path, manual_audited, scanned, last_audit, note, highlight]
+            row_data = [display_path, False, False, "Never", note, False]
+            table_model.addRow(row_data)
+            print("Added new path to table: {} with note: '{}'".format(display_path, note))
+            return True
+            
+        except Exception as e:
+            print("Error adding path to table: {}".format(str(e)))
+            return False
+    
+    def _save_note(self, event):
+        """Save the note for the current request to the watch list"""
+        if self._current_request_info is None:
+            JOptionPane.showMessageDialog(
+                self._component,
+                "No request selected",
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+            return
+        
+        try:
+            url = self._current_request_info.getUrl()
+            full_url = url.toString()
+            path = url.getPath()
+            note_text = self._note_textarea.getText().strip()
+            
+            # Find the path in the watch list and update its note
+            # Note: We need to check both full URL and path for backward compatibility
+            if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
+                updated = False
+                for item in self._extender._data['watch_list_audit']:
+                    if isinstance(item, dict) and (item.get('path') == full_url or item.get('path') == path):
+                        item['note'] = note_text
+                        item['path'] = full_url  # Update to full URL format
+                        updated = True
+                        print("Updated note for path: {} -> '{}'".format(full_url, note_text))
+                        break
+                
+                if not updated:
+                    # Path not in watch list, add it with the note
+                    self._extender._data['watch_list_audit'].append({
+                        'path': full_url,  # Store full URL
+                        'manual_audited': False,
+                        'scanned': False,
+                        'last_audit': 'Never',
+                        'note': note_text,
+                        'highlight': False
+                    })
+                    print("Added new path with note: {} -> '{}'".format(full_url, note_text))
+                
+                # Save the updated data to database
+                self._extender._save_watch_list_to_database()
+                
+                # Update the table: either update existing row or add new row
+                # Use full URL for internal operations but display format for table
+                if not self._update_table_note_for_path(full_url, note_text):
+                    # Path wasn't in table, add it
+                    self._add_path_to_table(full_url, note_text)
+                
+                JOptionPane.showMessageDialog(
+                    self._component,
+                    "Note saved for path: {}".format(path),
+                    "Note Saved",
+                    JOptionPane.INFORMATION_MESSAGE
+                )
+            
+        except Exception as e:
+            print("Error saving note from CWE tab: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Error saving note: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _clear_note(self, event):
+        """Clear the note text area and save the changes"""
+        if self._current_request_info is None:
+            self._note_textarea.setText("")
+            return
+        
+        try:
+            url = self._current_request_info.getUrl()
+            full_url = url.toString()
+            path = url.getPath()
+            
+            # Clear the text area
+            self._note_textarea.setText("")
+            
+            # Find the path in the watch list and clear its note
+            # Check both full URL and path for backward compatibility
+            if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
+                for item in self._extender._data['watch_list_audit']:
+                    if isinstance(item, dict) and (item.get('path') == full_url or item.get('path') == path):
+                        item['note'] = ''
+                        item['path'] = full_url  # Update to full URL format
+                        print("Cleared note for path: {}".format(full_url))
+                        break
+                
+                # Save the updated data to database
+                self._extender._save_watch_list_to_database()
+                
+                # Update the specific row in the watch list table
+                self._update_table_note_for_path(full_url, '')
+            
+        except Exception as e:
+            print("Error clearing note from CWE tab: {}".format(str(e)))
+    
+    def _load_note_for_current_request(self):
+        """Load existing note for the current request path"""
+        if self._current_request_info is None:
+            return
+        
+        try:
+            url = self._current_request_info.getUrl()
+            path = url.getPath()
+            
+            # Search for existing note in watch list
+            if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
+                for item in self._extender._data['watch_list_audit']:
+                    if isinstance(item, dict) and item.get('path') == path:
+                        note = item.get('note', '')
+                        self._note_textarea.setText(note)
+                        print("Loaded note for path {}: '{}'".format(path, note))
+                        return
+            
+            # No note found, clear the text area
+            self._note_textarea.setText("")
+            
+        except Exception as e:
+            print("Error loading note for current request: {}".format(str(e)))
 
 # Register the extension
 if __name__ in ('__main__', 'main'):
