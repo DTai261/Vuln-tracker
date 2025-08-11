@@ -22,6 +22,7 @@ import json
 import traceback
 import os
 import shutil
+import time
 from datetime import datetime
 
 class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMessageEditorTabFactory):
@@ -163,7 +164,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     original_text = self._status_label.getText()
                     
                     # Temporarily change status text to show success
-                    self._status_label.setText("✓ Action completed successfully!")
+                    self._status_label.setText("Action completed successfully!")
                     
                     # Create timer to restore original text after 2 seconds
                     from javax.swing import Timer
@@ -186,6 +187,25 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error showing status feedback: {}".format(str(e)))
             if message:
                 print("Intended message: {}".format(message))
+    
+    def _update_row_numbers(self):
+        """Update the row numbers in the first column after table changes"""
+        try:
+            if hasattr(self, '_watch_table_model'):
+                # Set flag to prevent recursion from table model listener AND prevent saving corruption
+                self._is_updating_gui = True
+                print("Updating row numbers - GUI update mode enabled, saving disabled")
+                for row in range(self._watch_table_model.getRowCount()):
+                    self._watch_table_model.setValueAt(str(row + 1), row, 0)  # Column 0 is the # column
+                # Clear flag
+                self._is_updating_gui = False
+                print("Row number update completed - GUI update mode disabled, saving re-enabled")
+        except Exception as e:
+            print("Error updating row numbers: {}".format(str(e)))
+            # Ensure flag is cleared even on error
+            if hasattr(self, '_is_updating_gui'):
+                self._is_updating_gui = False
+                print("GUI update flag cleared after error")
     
     def _init_database(self):
         """Initialize JSON file for persistent storage with project mapping"""
@@ -1144,30 +1164,53 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             'manual_audited': False,
                             'scanned': False,
                             'last_audit': 'Never',
+                            'note': '',
                             'highlight': False
                         })
                         needs_repair = True
                         print("Repaired string item '{}' to full audit structure".format(item))
                     elif isinstance(item, dict):
-                        # Validate required fields and add missing ones
-                        required_fields = {
-                            'path': '',
-                            'manual_audited': False,
-                            'scanned': False,
-                            'last_audit': 'Never',
-                            'highlight': False
-                        }
-                        
-                        repaired_item = {}
-                        for field, default_value in required_fields.items():
-                            if field in item:
-                                repaired_item[field] = item[field]
-                            else:
-                                repaired_item[field] = default_value
+                        # Check for data corruption first
+                        if self._is_item_corrupted(item):
+                            print("CORRUPTION DETECTED in item {}: {}".format(i, item))
+                            repaired_item = self._repair_corrupted_item(item)
+                            if repaired_item:
+                                repaired_items.append(repaired_item)
                                 needs_repair = True
-                                print("Added missing field '{}' to item '{}'".format(field, item.get('path', 'unknown')))
-                        
-                        repaired_items.append(repaired_item)
+                                print("REPAIRED item {}: {}".format(i, repaired_item))
+                            else:
+                                print("COULD NOT REPAIR item {}, skipping".format(i))
+                                needs_repair = True
+                        else:
+                            # Validate required fields and add missing ones
+                            required_fields = {
+                                'path': '',
+                                'manual_audited': False,
+                                'scanned': False,
+                                'last_audit': 'Never',
+                                'note': '',
+                                'highlight': False
+                            }
+                            
+                            repaired_item = {}
+                            for field, default_value in required_fields.items():
+                                if field in item:
+                                    # Ensure data types are correct
+                                    if field == 'manual_audited' or field == 'scanned' or field == 'highlight':
+                                        repaired_item[field] = bool(item[field]) if isinstance(item[field], bool) else False
+                                    else:
+                                        repaired_item[field] = str(item[field]) if item[field] is not None else default_value
+                                else:
+                                    repaired_item[field] = default_value
+                                    needs_repair = True
+                                    print("Added missing field '{}' to item '{}'".format(field, item.get('path', 'unknown')))
+                            
+                            # Preserve additional fields
+                            for field, value in item.items():
+                                if field not in repaired_item:
+                                    repaired_item[field] = value
+                            
+                            repaired_items.append(repaired_item)
                     else:
                         print("Skipping invalid item type in watch_list_audit: {}".format(type(item)))
                         needs_repair = True
@@ -1193,6 +1236,105 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 "settings": {},
                 "vuln_counter": 0
             }
+    
+    def _is_item_corrupted(self, item):
+        """Check if a watch list audit item is corrupted"""
+        try:
+            # Check for type mismatches that indicate corruption
+            if not isinstance(item, dict):
+                return True
+            
+            path = item.get('path')
+            manual_audited = item.get('manual_audited')
+            scanned = item.get('scanned')
+            last_audit = item.get('last_audit')
+            note = item.get('note')
+            highlight = item.get('highlight')
+            
+            # Check for corruption patterns:
+            # 1. manual_audited should be bool, not string/URL
+            if manual_audited is not None and not isinstance(manual_audited, bool) and str(manual_audited).startswith('http'):
+                return True
+            
+            # 2. highlight should be bool, not string
+            if highlight is not None and not isinstance(highlight, bool) and isinstance(highlight, str) and len(str(highlight)) > 10:
+                return True
+            
+            # 3. note should be string, not timestamp in wrong field
+            if note is not None and isinstance(note, str) and note.count('-') == 2 and note.count(':') == 1:
+                # Looks like a timestamp got put in note field
+                return True
+            
+            # 4. scanned should be bool, not string
+            if scanned is not None and not isinstance(scanned, bool) and isinstance(scanned, str):
+                return True
+            
+            # 5. last_audit should be string, not bool
+            if last_audit is not None and isinstance(last_audit, bool):
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print("Error checking item corruption: {}".format(str(e)))
+            return True
+    
+    def _repair_corrupted_item(self, item):
+        """Attempt to repair a corrupted watch list audit item"""
+        try:
+            if not isinstance(item, dict):
+                return None
+            
+            # Try to extract the correct path (should be the only HTTP URL)
+            path = ""
+            for key, value in item.items():
+                if isinstance(value, str) and value.startswith('http'):
+                    path = value
+                    break
+            
+            if not path:
+                # Try to get path from the 'path' field even if corrupted
+                path = str(item.get('path', ''))
+                if not path.startswith('http'):
+                    print("Cannot find valid path in corrupted item")
+                    return None
+            
+            # Create repaired item with correct defaults
+            repaired_item = {
+                'path': path,
+                'manual_audited': False,
+                'scanned': False,
+                'last_audit': 'Never',
+                'note': '',
+                'highlight': False
+            }
+            
+            # Try to salvage any valid data
+            original_manual_audited = item.get('manual_audited')
+            if isinstance(original_manual_audited, bool):
+                repaired_item['manual_audited'] = original_manual_audited
+            
+            original_scanned = item.get('scanned')
+            if isinstance(original_scanned, bool):
+                repaired_item['scanned'] = original_scanned
+            
+            original_last_audit = item.get('last_audit')
+            if isinstance(original_last_audit, str) and not isinstance(original_last_audit, bool):
+                repaired_item['last_audit'] = original_last_audit
+            
+            original_note = item.get('note')
+            if isinstance(original_note, str) and len(original_note) < 200:  # Reasonable note length
+                repaired_item['note'] = original_note
+            
+            original_highlight = item.get('highlight')
+            if isinstance(original_highlight, bool):
+                repaired_item['highlight'] = original_highlight
+            
+            return repaired_item
+            
+        except Exception as e:
+            print("Error repairing corrupted item: {}".format(str(e)))
+            return None
     
     def _save_vulnerability_to_database(self, vuln_id, vulnerability):
         """Save a single vulnerability to JSON file"""
@@ -1601,7 +1743,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         self._vuln_lock = threading.Lock()
         self._vuln_counter = 0  # Counter for unique vulnerability IDs
         
+        # Performance optimization for Scanner auto-audit
+        self._scanner_request_cache = {}  # Cache for scanner requests to prevent duplicate processing
+        self._last_cache_clear = time.time()  # Track when cache was last cleared
+        self._scanner_processing_queue = []  # Queue for batched scanner processing
+        self._last_batch_process = time.time()  # Track last batch processing time
+        self._scan_status_cache = {}  # Cache for scan status lookups
+        self._scan_cache_time = {}  # Cache timestamps
+        self._watchlist_match_cache = {}  # Cache for expensive watchlist matching
+        self._watchlist_cache_time = {}  # Timestamps for match cache
+        
         # Flag to prevent saving during project switches and GUI updates
+        # CRITICAL: This prevents data corruption when the GUI is being updated
+        # It ensures that table model changes don't trigger saves that could overwrite
+        # the internal data structure with incorrect column mappings
         self._is_updating_gui = False
         
         # CWE definitions
@@ -1790,7 +1945,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         table_panel.add(instruction_label, BorderLayout.NORTH)
         
         # Create table for watch list with audit status
-        column_names = ["Path/URL", "Manual Audited", "Scanned", "Last Audit", "Note", "Highlight"]
+        column_names = ["#", "Path/URL", "Manual Audited", "Scanned", "Last Audit", "Note", "Highlight"]
         
         # Create custom table model
         class AuditTableModel(DefaultTableModel):
@@ -1798,14 +1953,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 DefaultTableModel.__init__(self, column_names, rows)
             
             def isCellEditable(self, row, column):
-                if column == 4:  # "Note" column is user-editable
+                if column == 5:  # "Note" column is user-editable (moved from 4 to 5)
                     return True
-                if column == 5:  # "Highlight" column is user-editable
+                if column == 6:  # "Highlight" column is user-editable (moved from 5 to 6)
                     return True
                 return False  # Other columns are auto-managed by tool detection
             
             def getColumnClass(self, column):
-                if column in [1, 2, 5]:  # "Manual Audited", "Scanned", "Highlight" columns
+                if column in [2, 3, 6]:  # "Manual Audited", "Scanned", "Highlight" columns (shifted by 1)
                     return java.lang.Boolean
                 return java.lang.String
         
@@ -1825,12 +1980,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         
         # Set column widths
         column_model = self._watch_table.getColumnModel()
-        column_model.getColumn(0).setPreferredWidth(280)  # Path/URL
-        column_model.getColumn(1).setPreferredWidth(100)  # Manual Audited
-        column_model.getColumn(2).setPreferredWidth(80)   # Scanned
-        column_model.getColumn(3).setPreferredWidth(130)  # Last Audit
-        column_model.getColumn(4).setPreferredWidth(200)  # Note
-        column_model.getColumn(5).setPreferredWidth(80)   # Highlight
+        column_model.getColumn(0).setPreferredWidth(40)   # # (Number)
+        column_model.getColumn(1).setPreferredWidth(280)  # Path/URL
+        column_model.getColumn(2).setPreferredWidth(100)  # Manual Audited
+        column_model.getColumn(3).setPreferredWidth(80)   # Scanned
+        column_model.getColumn(4).setPreferredWidth(130)  # Last Audit
+        column_model.getColumn(5).setPreferredWidth(200)  # Note
+        column_model.getColumn(6).setPreferredWidth(80)   # Highlight
         
         # Add table change listener to save audit status
         self._watch_table_model.addTableModelListener(lambda e: self._on_audit_status_changed(e))
@@ -2046,9 +2202,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # Apply renderers based on column type
         for i in range(self._watch_table.getColumnCount()):
             column = self._watch_table.getColumnModel().getColumn(i)
-            if i in [1, 2, 5]:  # "Manual Audited", "Scanned", "Highlight" columns
+            if i in [2, 3, 6]:  # "Manual Audited", "Scanned", "Highlight" columns (shifted by 1)
                 column.setCellRenderer(checkbox_renderer)
-            else:  # Text columns (Path/URL, Last Audit, Note)
+            else:  # Text columns (#, Path/URL, Last Audit, Note)
                 column.setCellRenderer(text_renderer)
     
     def _delete_selected_requests(self):
@@ -2073,12 +2229,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # First, collect all the path URLs to be deleted
                 paths_to_delete = []
                 for row in selected_rows:
-                    path_url = self._watch_table_model.getValueAt(row, 0)
+                    path_url = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
                     paths_to_delete.append(path_url)
                 
                 # Remove rows in reverse order to maintain indices
                 for row in sorted(selected_rows, reverse=True):
                     self._watch_table_model.removeRow(row)
+                
+                # Update row numbers after deletion
+                self._update_row_numbers()
                 
                 # Remove from internal watch list audit data
                 if hasattr(self, '_data') and 'watch_list_audit' in self._data:
@@ -2119,7 +2278,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         print("Selected for vulnerability marking: {}".format(full_url))
                 else:
                     # Fallback: get from table display (might be just a path)
-                    path_url = self._watch_table_model.getValueAt(row, 0)
+                    path_url = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
                     selected_paths.append(path_url)
                     print("Fallback: Using table display value: {}".format(path_url))
             
@@ -2398,13 +2557,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if result == JOptionPane.YES_OPTION:
                 # Set highlight value for all selected rows
                 for row in selected_rows:
-                    # Column 5 is the Highlight column
-                    self._watch_table_model.setValueAt(enable_highlight, row, 5)
+                    # Column 6 is the Highlight column
+                    self._watch_table_model.setValueAt(enable_highlight, row, 6)
                 
                 # Update the internal data structure
                 if hasattr(self, '_data') and 'watch_list_audit' in self._data:
                     for row in selected_rows:
-                        path_url = self._watch_table_model.getValueAt(row, 0)
+                        path_url = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
                         # Find the corresponding item in the watch list audit data
                         for item in self._data['watch_list_audit']:
                             if isinstance(item, dict) and item.get('path') == path_url:
@@ -2431,7 +2590,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _send_to_repeater(self, row_index):
         """Send the selected request to Burp Repeater"""
         try:
-            path_url = self._watch_table_model.getValueAt(row_index, 0)
+            path_url = self._watch_table_model.getValueAt(row_index, 1)  # Column 1 is now path/URL
             
             # For now, just show feedback. In a real implementation, you would:
             # 1. Find the corresponding HTTP request from the sitemap
@@ -2519,7 +2678,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         vuln_panel.add(top_panel, BorderLayout.NORTH)
         
         # Vulnerabilities table
-        column_names = ["CWE", "Description", "Method", "URL", "Timestamp", "Remove"]
+        column_names = ["CWE", "Description", "Method", "URL", "Note", "Timestamp", "Remove"]
         
         # Create custom table model for remove button
         class VulnTableModel(DefaultTableModel):
@@ -2530,13 +2689,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 return False  # All cells are read-only
             
             def getColumnClass(self, column):
-                if column == 5:  # "Remove" column
+                if column == 6:  # "Remove" column (moved from 5 to 6)
                     return java.lang.String  # Will be rendered as button
                 return java.lang.String
         
         self._vuln_table_model = VulnTableModel(column_names, 0)
         self._vuln_table = JTable(self._vuln_table_model)
         self._vuln_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
+        # self._vuln_table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF)
         self._vuln_table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS)
         
         # Add hover highlighting for vulnerability table
@@ -2550,12 +2710,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         
         # Set column widths
         column_model = self._vuln_table.getColumnModel()
-        column_model.getColumn(0).setPreferredWidth(80)   # CWE
+        column_model.getColumn(0).setPreferredWidth(60)   # CWE
         column_model.getColumn(1).setPreferredWidth(150)  # Description
         column_model.getColumn(2).setPreferredWidth(60)   # Method
-        column_model.getColumn(3).setPreferredWidth(300)  # URL
-        column_model.getColumn(4).setPreferredWidth(120)  # Timestamp
-        column_model.getColumn(5).setPreferredWidth(70)   # Remove button
+        column_model.getColumn(3).setPreferredWidth(280)  # URL
+        column_model.getColumn(4).setPreferredWidth(120)  # Note
+        column_model.getColumn(5).setPreferredWidth(120)  # Timestamp
+        column_model.getColumn(6).setPreferredWidth(70)   # Remove button
         
         vuln_scroll = JScrollPane(self._vuln_table)
         vuln_panel.add(vuln_scroll, BorderLayout.CENTER)
@@ -2613,7 +2774,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     col = table.columnAtPoint(event.getPoint())
                     
                     # Check if "Remove" column was clicked
-                    if col == 5 and row >= 0:  # Remove column
+                    if col == 6 and row >= 0:  # Remove column (moved from 5 to 6)
                         self.extension_parent._remove_vulnerability_at_row(row)
             
             def _show_context_menu(self, event):
@@ -2716,7 +2877,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         
         for i in range(self._vuln_table.getColumnCount()):
             column = self._vuln_table.getColumnModel().getColumn(i)
-            if i == 5:  # Remove button column
+            if i == 6:  # Remove button column (moved from 5 to 6)
                 column.setCellRenderer(button_renderer)
             else:  # Text columns
                 column.setCellRenderer(text_renderer)
@@ -2880,6 +3041,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if hasattr(self, '_watch_table_model') and hasattr(self, '_data'):
                 print("Updating table with data. Table model exists: True, Data exists: True")
                 
+                # Set flag to prevent table model listener from firing during population
+                self._is_updating_gui = True
+                
                 # Clear existing table data thoroughly with enhanced clearing
                 self._watch_table_model.setRowCount(0)
                 self._watch_table_model.fireTableDataChanged()
@@ -2897,6 +3061,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if 'watch_list_audit' in self._data and self._data['watch_list_audit']:
                     print("Loading {} audit items into table".format(len(self._data['watch_list_audit'])))
                     # Load from detailed audit data
+                    row_number = 1
                     for item in self._data['watch_list_audit']:
                         if isinstance(item, dict):
                             path = item.get('path', '')
@@ -2908,13 +3073,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             last_audit = item.get('last_audit', date_added if manual_audited or scanned else "Never")
                             note = item.get('note', '')  # Get user note
                             highlight = item.get('highlight', False)  # Default to false for highlighting
-                            row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
+                            row_data = [str(row_number), display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
+                            row_number += 1
                             print("Added to table: {} (manual: {}, scanned: {}, last audit: {}, note: '{}', highlight: {})".format(
                                 display_path, manual_audited, scanned, last_audit, note, highlight))
                 elif hasattr(self, '_data') and self._data.get('watch_list_audit'):
                     print("Creating table entries from watch list audit data")
                     # Fallback: create table entries from watch list audit data
+                    row_number = 1
                     for item in self._data['watch_list_audit']:
                         if isinstance(item, dict):
                             path = item.get('path', '')
@@ -2925,8 +3092,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             last_audit = item.get('last_audit', "Never")
                             note = item.get('note', '')  # Get user note
                             highlight = item.get('highlight', False)
-                            row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
+                            row_data = [str(row_number), display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
+                            row_number += 1
                             print("Added to table (fallback): {}".format(display_path))
                 else:
                     print("No path data found to populate table")
@@ -2936,7 +3104,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if total_paths > 0:
                     audited_count = 0
                     for row in range(total_paths):
-                        if self._watch_table_model.getValueAt(row, 1):  # Audited column
+                        if self._watch_table_model.getValueAt(row, 2):  # Manual audited column is now 2
                             audited_count += 1
                     
                     self._status_label.setText("Ready - {} paths ({} audited, {} pending)".format(
@@ -2975,8 +3143,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Update vulnerabilities table
             self._refresh_vulnerability_table()
             
+            # Clear the flag before updating audit status to allow the audit display to work properly
+            self._is_updating_gui = False
+            
             # Update progress bar display
             self._update_audit_status_display()
+            
+            # Re-set flag temporarily for final UI updates
+            self._is_updating_gui = True
             
             # Force repaint of table components to ensure they show the new data
             if hasattr(self, '_watch_table'):
@@ -3176,7 +3350,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if stored_url:
                     # Update the table display
                     display_url = self._get_display_url(stored_url)
-                    self._watch_table_model.setValueAt(display_url, row, 0)
+                    self._watch_table_model.setValueAt(display_url, row, 1)  # Column 1 is now path/URL
             
             # Also update the text area
             self._sync_table_to_text()
@@ -3397,7 +3571,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Get existing paths to avoid duplicates (check both table and internal data)
             existing_display_paths = set()
             for row in range(self._watch_table_model.getRowCount()):
-                existing_display_paths.add(self._watch_table_model.getValueAt(row, 0))
+                existing_display_paths.add(self._watch_table_model.getValueAt(row, 1))  # Column 1 is now path/URL
             
             # Also check internal data for existing full URLs
             existing_full_urls = set()
@@ -4124,7 +4298,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Get existing paths to avoid duplicates (check both table and internal data)
             existing_paths = set()
             for row in range(self._watch_table_model.getRowCount()):
-                existing_paths.add(self._watch_table_model.getValueAt(row, 0))
+                existing_paths.add(self._watch_table_model.getValueAt(row, 1))  # Column 1 is now path/URL
             
             # Also check internal data for existing full URLs
             existing_full_urls = set()
@@ -4399,7 +4573,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 existing_full_urls = set()
                 
                 for row in range(self._watch_table_model.getRowCount()):
-                    existing_display_paths.add(self._watch_table_model.getValueAt(row, 0))
+                    existing_display_paths.add(self._watch_table_model.getValueAt(row, 1))  # Column 1 is now path/URL
                 
                 # Also check internal data for existing full URLs
                 if hasattr(self, '_data') and 'watch_list_audit' in self._data:
@@ -4508,9 +4682,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Fallback: export from table if no internal data (shouldn't normally happen)
                 print("Warning: Exporting from table display instead of internal storage")
                 for row in range(self._watch_table_model.getRowCount()):
-                    path = self._watch_table_model.getValueAt(row, 0)
-                    audited = self._watch_table_model.getValueAt(row, 1)
-                    date_added = self._watch_table_model.getValueAt(row, 2)
+                    path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                    audited = self._watch_table_model.getValueAt(row, 2)  # Column 2 is now manual audited
+                    scanned = self._watch_table_model.getValueAt(row, 3)  # Column 3 is now scanned
+                    last_audit = self._watch_table_model.getValueAt(row, 4)  # Column 4 is now last audit
+                    note = self._watch_table_model.getValueAt(row, 5)  # Column 5 is now note
                     
                     if file_path.lower().endswith('.json'):
                         export_data.append({
@@ -5180,7 +5356,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Check table for display path duplicates
                 for row in range(self._watch_table_model.getRowCount()):
-                    if self._watch_table_model.getValueAt(row, 0) == display_path:
+                    if self._watch_table_model.getValueAt(row, 1) == display_path:  # Column 1 is now path/URL
                         self._show_status_feedback("Path already exists in watch list")
                         return
                 
@@ -5195,8 +5371,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
                     self._data = {'watch_list_audit': []}
                 
-                # Add to table
-                row_data = [display_path, False, False, "Never", "", False]  # Added empty note and False for highlight column
+                # Add to table with row number as first column
+                row_number = self._watch_table_model.getRowCount() + 1
+                row_data = [str(row_number), display_path, False, False, "Never", "", False]  # [#, Path/URL, Manual Audited, Scanned, Last Audit, Note, Highlight]
                 self._watch_table_model.addRow(row_data)
                 
                 # CRITICAL FIX: Also add to internal data structure with full URL
@@ -5245,7 +5422,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 return
             
             # Get path for confirmation
-            path = self._watch_table_model.getValueAt(selected_row, 0)
+            path = self._watch_table_model.getValueAt(selected_row, 1)  # Column 1 is now path/URL
             
             # Confirm removal
             result = JOptionPane.showConfirmDialog(
@@ -5257,6 +5434,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             if result == JOptionPane.YES_OPTION:
                 self._watch_table_model.removeRow(selected_row)
+                
+                # Update row numbers after deletion
+                self._update_row_numbers()
                 
                 # Sync to text area
                 self._sync_table_to_text()
@@ -5285,8 +5465,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
             # Get current note
             current_note = ""
-            if self._watch_table_model.getColumnCount() > 4:
-                current_note = self._watch_table_model.getValueAt(row_index, 4) or ""
+            if self._watch_table_model.getColumnCount() > 5:  # Note column is now 5
+                current_note = self._watch_table_model.getValueAt(row_index, 5) or ""  # Column 5 is now note
             
             # Get the path for context
             path = self._watch_table_model.getValueAt(row_index, 0)
@@ -5314,7 +5494,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 new_note = text_area.getText().strip()
                 
                 # Update the table model
-                self._watch_table_model.setValueAt(new_note, row_index, 4)
+                self._watch_table_model.setValueAt(new_note, row_index, 5)  # Column 5 is now note
                 
                 # Save the updated data
                 self._save_watch_list_data()
@@ -5361,7 +5541,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if result == JOptionPane.YES_OPTION:
                 # Mark all as audited
                 for row in range(self._watch_table_model.getRowCount()):
-                    self._watch_table_model.setValueAt(True, row, 1)  # Audited column
+                    self._watch_table_model.setValueAt(True, row, 2)  # Manual audited column is now 2
                 
                 # Save data
                 self._save_watch_list_data()
@@ -5497,6 +5677,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _save_watch_list_data(self):
         """Save watch list data including audit status"""
         try:
+            # Don't save if we're currently updating the GUI (prevents overwriting during project switches)
+            if hasattr(self, '_is_updating_gui') and self._is_updating_gui:
+                print("Skipping watch list save during GUI update to prevent data corruption")
+                return
+                
             if not hasattr(self, '_current_project_name') or not self._current_project_name:
                 print("No current project to save watch list data")
                 return
@@ -5510,27 +5695,43 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if table_rows == internal_items:
                     # Update audit status for each item, preserving the full URL
                     for row in range(table_rows):
-                        manual_audited = self._watch_table_model.getValueAt(row, 1)
-                        scanned = self._watch_table_model.getValueAt(row, 2)
-                        last_audit = self._watch_table_model.getValueAt(row, 3)
-                        note = self._watch_table_model.getValueAt(row, 4) if self._watch_table_model.getColumnCount() > 4 else ""
-                        highlight = self._watch_table_model.getValueAt(row, 5) if self._watch_table_model.getColumnCount() > 5 else False
+                        # CRITICAL FIX: Ensure we're getting the correct data types from table
+                        manual_audited_raw = self._watch_table_model.getValueAt(row, 2)  # Manual audited column is now 2
+                        scanned_raw = self._watch_table_model.getValueAt(row, 3)  # Scanned column is now 3
+                        last_audit_raw = self._watch_table_model.getValueAt(row, 4)  # Last audit column is now 4
+                        note_raw = self._watch_table_model.getValueAt(row, 5) if self._watch_table_model.getColumnCount() > 5 else ""  # Note column is now 5
+                        highlight_raw = self._watch_table_model.getValueAt(row, 6) if self._watch_table_model.getColumnCount() > 6 else False  # Highlight column is now 6
+                        
+                        # Convert to proper data types to prevent corruption
+                        manual_audited = bool(manual_audited_raw) if manual_audited_raw is not None else False
+                        scanned = bool(scanned_raw) if scanned_raw is not None else False
+                        last_audit = str(last_audit_raw) if last_audit_raw is not None else "Never"
+                        note = str(note_raw) if note_raw is not None else ""
+                        highlight = bool(highlight_raw) if highlight_raw is not None else False
                         
                         # Update only the audit status, keep the original full URL
                         if row < len(self._data['watch_list_audit']):
-                            self._data['watch_list_audit'][row]['manual_audited'] = manual_audited
-                            self._data['watch_list_audit'][row]['scanned'] = scanned
-                            self._data['watch_list_audit'][row]['last_audit'] = last_audit
-                            self._data['watch_list_audit'][row]['note'] = note
-                            self._data['watch_list_audit'][row]['highlight'] = highlight
-                            # DO NOT update the 'path' field - it should always remain a full URL
+                            item = self._data['watch_list_audit'][row]
+                            # CRITICAL: Only update the specific fields, never overwrite 'path'
+                            item['manual_audited'] = manual_audited
+                            item['scanned'] = scanned
+                            item['last_audit'] = last_audit
+                            item['note'] = note
+                            item['highlight'] = highlight
+                            # Ensure 'path' field is never corrupted by always preserving it as-is
+                            if 'path' not in item or not item['path']:
+                                print("WARNING: Missing path in item {}, skipping save to prevent corruption".format(row))
+                                return
+                        else:
+                            print("WARNING: Row {} exceeds internal data length, skipping save".format(row))
+                            return
                 else:
-                    print("Warning: Table rows ({}) and internal data ({}) count mismatch - skipping save".format(table_rows, internal_items))
+                    print("Warning: Table rows ({}) and internal data ({}) count mismatch - skipping save to prevent data corruption".format(table_rows, internal_items))
                     return
                 
                 # Save to file using the correct method
                 self._save_data_to_file(self._data)
-                print("Updated audit status for {} watch list items (URLs preserved)".format(table_rows))
+                print("Updated audit status for {} watch list items (URLs preserved, data integrity maintained)".format(table_rows))
             
         except Exception as e:
             print("Error saving watch list data: {}".format(str(e)))
@@ -5553,6 +5754,17 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         if not messageIsRequest:
             return
         
+        # Only process requests from tools we care about for performance
+        # Proxy: for highlighting, Repeater/Scanner: for auto-audit
+        relevant_tools = [
+            self._callbacks.TOOL_PROXY,     # For highlighting new requests
+            self._callbacks.TOOL_REPEATER,  # For auto-audit
+            self._callbacks.TOOL_SCANNER    # For auto-audit
+        ]
+        
+        if toolFlag not in relevant_tools:
+            return  # Skip processing for other tools
+        
         # Get the request details
         try:
             request = messageInfo.getRequest()
@@ -5568,12 +5780,42 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             path = url.getPath()
             full_url = str(url)
             
-            # Check if this request matches any of our paths
-            if self._matches_watchlist(path, full_url):
-                # Check if highlighting is enabled for matching paths
-                # Allow highlighting for most tools (exclude only Burp extensions themselves)
-                excluded_tools = [self._callbacks.TOOL_EXTENDER]
-                if toolFlag not in excluded_tools:
+            # Quick check: only proceed if we have watchlist data
+            if not hasattr(self, '_data') or 'watch_list_audit' not in self._data or not self._data['watch_list_audit']:
+                return
+            
+            # For proxy requests, do a fast preliminary check to avoid expensive matching
+            if toolFlag == self._callbacks.TOOL_PROXY:
+                # Quick hostname check - if the hostname doesn't match any watchlist item, skip
+                from urlparse import urlparse
+                try:
+                    parsed_url = urlparse(full_url)
+                    request_hostname = parsed_url.hostname
+                    
+                    # Quick check: see if any watchlist item contains this hostname
+                    hostname_match_found = False
+                    for item in self._data['watch_list_audit']:
+                        watch_path = item.get('path', '') if isinstance(item, dict) else str(item)
+                        if request_hostname and request_hostname in watch_path:
+                            hostname_match_found = True
+                            break
+                    
+                    if not hostname_match_found:
+                        return  # Skip expensive matching for unrelated hosts
+                        
+                except:
+                    pass  # If URL parsing fails, continue with normal processing
+            
+            # Check if this request matches any of our paths (with caching for Scanner)
+            matches_watchlist = False
+            if toolFlag == self._callbacks.TOOL_SCANNER:
+                matches_watchlist = self._matches_watchlist_cached(path, full_url)
+            else:
+                matches_watchlist = self._matches_watchlist(path, full_url)
+            
+            if matches_watchlist:
+                # Check if highlighting is enabled for matching paths (only for proxy requests)
+                if toolFlag == self._callbacks.TOOL_PROXY:
                     if self._should_highlight_path(path, full_url):
                         messageInfo.setHighlight("red")
                         
@@ -5583,21 +5825,175 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             messageInfo.setComment("Vuln Tracker: {} | Note: {}".format(path, note))
                         else:
                             messageInfo.setComment("Vuln Tracker: {}".format(path))
-                        
-                        print("Highlighted request: {} with note: '{}'".format(full_url, note))
                 
                 # Auto-mark as audited if request comes from Repeater
                 if toolFlag == self._callbacks.TOOL_REPEATER and self._auto_audit_repeater_enabled:
-                    self._auto_mark_as_audited(path, full_url, "Repeater")
-                    print("Auto-marked as audited (Repeater): {}".format(full_url))
+                    # Only auto-mark if not already manually audited
+                    if not self._is_already_manually_audited(path, full_url):
+                        self._auto_mark_as_audited(path, full_url, "Repeater")
                 
                 # Auto-mark as audited if request comes from Scanner
                 if toolFlag == self._callbacks.TOOL_SCANNER and self._auto_audit_scanner_enabled:
-                    self._auto_mark_as_audited(path, full_url, "Scanner")
-                    print("Auto-marked as audited (Scanner): {}".format(full_url))
+                    # Use throttled scanner processing to prevent performance issues
+                    self._throttled_scanner_processing(path, full_url)
                 
         except Exception as e:
+            # Only log actual errors, not normal operation
             print("Error processing HTTP message: {}".format(str(e)))
+    
+    def _throttled_scanner_processing(self, path, full_url):
+        """Throttled processing for Scanner requests to prevent performance issues"""
+        try:
+            current_time = time.time()
+            
+            # Create a cache key for this request (normalize to avoid duplicates)
+            cache_key = "{}::{}".format(path, full_url.split('?')[0])  # Remove query params for cache key
+            
+            # Clear cache every 30 seconds to prevent memory buildup
+            if current_time - self._last_cache_clear > 30:
+                self._scanner_request_cache.clear()
+                self._last_cache_clear = current_time
+            
+            # Check if we've already processed this request recently (within 5 seconds)
+            if cache_key in self._scanner_request_cache:
+                if current_time - self._scanner_request_cache[cache_key] < 5:
+                    return  # Skip duplicate processing
+            
+            # Update cache with current time
+            self._scanner_request_cache[cache_key] = current_time
+            
+            # Add to processing queue instead of immediate processing
+            request_data = {
+                'path': path,
+                'full_url': full_url,
+                'timestamp': current_time
+            }
+            
+            self._scanner_processing_queue.append(request_data)
+            
+            # Process queue in batches every 3 seconds to reduce GUI updates
+            if current_time - self._last_batch_process > 3:
+                self._process_scanner_queue_batch()
+                self._last_batch_process = current_time
+                
+        except Exception as e:
+            print("Error in throttled scanner processing: {}".format(str(e)))
+    
+    def _process_scanner_queue_batch(self):
+        """Process queued scanner requests in batches"""
+        try:
+            if not self._scanner_processing_queue:
+                return
+            
+            # Take up to 10 items from queue to process at once
+            batch_size = min(10, len(self._scanner_processing_queue))
+            batch_to_process = self._scanner_processing_queue[:batch_size]
+            self._scanner_processing_queue = self._scanner_processing_queue[batch_size:]
+            
+            marked_any = False
+            
+            # Process batch
+            for request_data in batch_to_process:
+                path = request_data['path']
+                full_url = request_data['full_url']
+                
+                # Quick check if already scanned (with optimized lookup)
+                if not self._is_already_scanned_optimized(path, full_url):
+                    # Mark as scanned using optimized method
+                    if self._auto_mark_as_audited_optimized(path, full_url, "Scanner"):
+                        marked_any = True
+            
+            # Only update GUI and save if something changed
+            if marked_any:
+                # Defer GUI updates to prevent freezing
+                SwingUtilities.invokeLater(lambda: self._deferred_update_after_scanner_batch())
+                
+        except Exception as e:
+            print("Error processing scanner queue batch: {}".format(str(e)))
+    
+    def _deferred_update_after_scanner_batch(self):
+        """Deferred GUI update after scanner batch processing"""
+        try:
+            # Save data (but limit frequency)
+            current_time = time.time()
+            if not hasattr(self, '_last_scanner_save') or current_time - self._last_scanner_save > 10:
+                self._save_watch_list_data()
+                self._last_scanner_save = current_time
+            
+            # Update status (throttled)
+            if not hasattr(self, '_last_status_update') or current_time - self._last_status_update > 5:
+                self._update_audit_status_display()
+                self._last_status_update = current_time
+                
+        except Exception as e:
+            print("Error in deferred scanner update: {}".format(str(e)))
+    
+    def _is_already_scanned_optimized(self, path, full_url):
+        """Optimized check if path is already scanned (with caching)"""
+        try:
+            # Use cache to avoid repeated table lookups
+            cache_key = "scanned_{}".format(path)
+            current_time = time.time()
+            
+            # Initialize scan status cache if needed
+            if not hasattr(self, '_scan_status_cache'):
+                self._scan_status_cache = {}
+            if not hasattr(self, '_scan_cache_time'):
+                self._scan_cache_time = {}
+            
+            # Check cache first (cache valid for 30 seconds)
+            if cache_key in self._scan_status_cache:
+                if current_time - self._scan_cache_time.get(cache_key, 0) < 30:
+                    return self._scan_status_cache[cache_key]
+            
+            # Cache miss - check table
+            result = self._is_already_scanned(path, full_url)
+            
+            # Update cache
+            self._scan_status_cache[cache_key] = result
+            self._scan_cache_time[cache_key] = current_time
+            
+            return result
+            
+        except Exception as e:
+            print("Error in optimized scan check: {}".format(str(e)))
+            return False
+    
+    def _auto_mark_as_audited_optimized(self, path, full_url, source_tool="Scanner"):
+        """Optimized version of auto-mark for scanner (batch-friendly)"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return False
+            
+            marked_any = False
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            # Only scan table once, cache the matched rows
+            for row in range(self._watch_table_model.getRowCount()):
+                table_path = self._watch_table_model.getValueAt(row, 1)
+                
+                if self._is_match(table_path, path, full_url):
+                    # Check if not already scanned
+                    current_scanned = self._watch_table_model.getValueAt(row, 3)
+                    if not current_scanned:
+                        # Mark as scanned
+                        self._watch_table_model.setValueAt(True, row, 3)
+                        self._watch_table_model.setValueAt(current_time, row, 4)
+                        marked_any = True
+                        
+                        # Update cache to reflect the change
+                        cache_key = "scanned_{}".format(path)
+                        if hasattr(self, '_scan_status_cache'):
+                            self._scan_status_cache[cache_key] = True
+                            self._scan_cache_time[cache_key] = time.time()
+                        
+                        break  # Only mark first match to avoid duplicates
+            
+            return marked_any
+            
+        except Exception as e:
+            print("Error in optimized auto-mark: {}".format(str(e)))
+            return False
     
     def _auto_mark_as_audited(self, path, full_url, source_tool="Repeater"):
         """Automatically mark matching paths as audited when accessed from specified tool"""
@@ -5608,7 +6004,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Find matching paths in the table and mark them as audited
             marked_count = 0
             for row in range(self._watch_table_model.getRowCount()):
-                table_path = self._watch_table_model.getValueAt(row, 0)
+                table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
                 
                 # Check if this table entry matches the current request
                 if self._is_match(table_path, path, full_url):
@@ -5618,23 +6014,23 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     
                     if source_tool == "Repeater":
                         # Check if not already manually audited
-                        current_manual_audited = self._watch_table_model.getValueAt(row, 1)
+                        current_manual_audited = self._watch_table_model.getValueAt(row, 2)  # Manual audited column is now 2
                         if not current_manual_audited:
                             # Mark as manually audited (column 1)
-                            self._watch_table_model.setValueAt(True, row, 1)
-                            # Update last audit time (column 3)
-                            self._watch_table_model.setValueAt(current_time, row, 3)
+                            self._watch_table_model.setValueAt(True, row, 2)  # Manual audited column is now 2
+                            # Update last audit time (column 4)
+                            self._watch_table_model.setValueAt(current_time, row, 4)  # Last audit column is now 4
                             marked_this_path = True
                             print("Auto-marked path as manually audited ({}): {}".format(source_tool, table_path))
                     
                     elif source_tool == "Scanner":
                         # Check if not already scanned
-                        current_scanned = self._watch_table_model.getValueAt(row, 2)
+                        current_scanned = self._watch_table_model.getValueAt(row, 3)  # Scanned column is now 3
                         if not current_scanned:
-                            # Mark as scanned (column 2)
-                            self._watch_table_model.setValueAt(True, row, 2)
-                            # Update last audit time (column 3)
-                            self._watch_table_model.setValueAt(current_time, row, 3)
+                            # Mark as scanned (column 3)
+                            self._watch_table_model.setValueAt(True, row, 3)  # Scanned column is now 3
+                            # Update last audit time (column 4)
+                            self._watch_table_model.setValueAt(current_time, row, 4)  # Last audit column is now 4
                             marked_this_path = True
                             print("Auto-marked path as scanned ({}): {}".format(source_tool, table_path))
                     
@@ -5663,15 +6059,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 scanned_count = 0
                 
                 for row in range(total_paths):
-                    if self._watch_table_model.getValueAt(row, 1):  # Manual Audited column
+                    if self._watch_table_model.getValueAt(row, 2):  # Manual Audited column is now 2
                         manual_audited_count += 1
-                    if self._watch_table_model.getValueAt(row, 2):  # Scanned column
+                    if self._watch_table_model.getValueAt(row, 3):  # Scanned column is now 3
                         scanned_count += 1
                 
                 # Calculate how many paths have any kind of audit
                 audited_paths = set()
                 for row in range(total_paths):
-                    if self._watch_table_model.getValueAt(row, 1) or self._watch_table_model.getValueAt(row, 2):
+                    if self._watch_table_model.getValueAt(row, 2) or self._watch_table_model.getValueAt(row, 3):  # Manual audited or scanned
                         audited_paths.add(row)
                 
                 audited_count = len(audited_paths)
@@ -5703,7 +6099,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 original_text = self._status_label.getText()
                 
                 # Show temporary feedback
-                feedback_text = "✓ Auto-marked {} path{} as audited ({})".format(
+                feedback_text = "Auto-marked {} path{} as audited ({})".format(
                     count, "s" if count > 1 else "", source_tool)
                 self._status_label.setText(feedback_text)
                 
@@ -5734,8 +6130,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Check each row in the table to see if highlighting is enabled for matching paths
             for row in range(self._watch_table_model.getRowCount()):
-                table_path = self._watch_table_model.getValueAt(row, 0)
-                highlight_enabled = self._watch_table_model.getValueAt(row, 5)  # Highlight column is now at position 5
+                table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                highlight_enabled = self._watch_table_model.getValueAt(row, 6)  # Highlight column is now at position 6
                 
                 # Check if this table entry matches the current request and highlighting is enabled
                 if highlight_enabled and self._is_match(table_path, path, full_url):
@@ -5753,39 +6149,171 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             if hasattr(self, '_watch_table_model'):
                 for row in range(self._watch_table_model.getRowCount()):
-                    table_path = self._watch_table_model.getValueAt(row, 0)
+                    table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
                     if self._is_match(table_path, path, full_url):
-                        note = self._watch_table_model.getValueAt(row, 4)  # Note column
+                        note = self._watch_table_model.getValueAt(row, 5)  # Note column is now 5
                         return note if note else ""
             return ""
         except Exception as e:
             print("Error getting note for path: {}".format(str(e)))
             return ""
     
+    def _matches_watchlist_cached(self, path, full_url):
+        """Cached version of watchlist matching for Scanner performance"""
+        try:
+            # Create cache key (normalize URL to reduce cache misses)
+            cache_key = "match_{}::{}".format(path, full_url.split('?')[0])  # Remove query params
+            current_time = time.time()
+            
+            # Check cache first (cache valid for 60 seconds)
+            if cache_key in self._watchlist_match_cache:
+                if current_time - self._watchlist_cache_time.get(cache_key, 0) < 60:
+                    return self._watchlist_match_cache[cache_key]
+            
+            # Cache miss - do actual matching
+            result = self._matches_watchlist(path, full_url)
+            
+            # Update cache
+            self._watchlist_match_cache[cache_key] = result
+            self._watchlist_cache_time[cache_key] = current_time
+            
+            # Clean old cache entries every 100 lookups to prevent memory buildup
+            if len(self._watchlist_match_cache) > 100:
+                cutoff_time = current_time - 120  # Remove entries older than 2 minutes
+                keys_to_remove = [k for k, t in self._watchlist_cache_time.items() if t < cutoff_time]
+                for key in keys_to_remove:
+                    self._watchlist_match_cache.pop(key, None)
+                    self._watchlist_cache_time.pop(key, None)
+            
+            return result
+            
+        except Exception as e:
+            print("Error in cached watchlist matching: {}".format(str(e)))
+            return self._matches_watchlist(path, full_url)  # Fallback to non-cached
+    
     def _matches_watchlist(self, path, full_url):
         """Check if the path/URL matches any item in our watch list"""
+        # Check if _data exists
+        if not hasattr(self, '_data'):
+            return False
+        
         if hasattr(self, '_data') and 'watch_list_audit' in self._data:
-            for item in self._data['watch_list_audit']:
+            watchlist_size = len(self._data['watch_list_audit'])
+            
+            if watchlist_size == 0:
+                return False
+            
+            # For performance: if we have a large watchlist, do quick hostname filtering
+            if watchlist_size > 10:
+                # Extract hostname from full_url for quick filtering
+                try:
+                    from urlparse import urlparse
+                    parsed_url = urlparse(full_url)
+                    request_hostname = parsed_url.hostname
+                    
+                    # Quick hostname pre-filter
+                    potential_matches = []
+                    for item in self._data['watch_list_audit']:
+                        watch_path = item.get('path', '') if isinstance(item, dict) else str(item)
+                        if request_hostname and request_hostname in watch_path:
+                            potential_matches.append(item)
+                    
+                    # If no hostname matches, skip expensive pattern matching
+                    if not potential_matches:
+                        return False
+                    
+                    # Only check the potential matches
+                    items_to_check = potential_matches
+                except:
+                    # If hostname extraction fails, check all items
+                    items_to_check = self._data['watch_list_audit']
+            else:
+                # Small watchlist - check everything
+                items_to_check = self._data['watch_list_audit']
+                
+            for item in items_to_check:
                 watch_path = item.get('path', '') if isinstance(item, dict) else str(item)
+                
                 if self._is_match(watch_path, path, full_url):
                     return True
+        else:
+            return False
+            
         return False
+    
+    def _is_already_scanned(self, path, full_url):
+        """Check if the path/URL is already marked as scanned in the watch list"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return False
+            
+            for row in range(self._watch_table_model.getRowCount()):
+                table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                
+                # Check if this table entry matches the current request
+                if self._is_match(table_path, path, full_url):
+                    # Check if already scanned (column 3)
+                    scanned = self._watch_table_model.getValueAt(row, 3)  # Scanned column is now 3
+                    if scanned:
+                        return True
+            return False
+        except Exception as e:
+            print("Error checking if already scanned: {}".format(str(e)))
+            return False
+    
+    def _is_already_manually_audited(self, path, full_url):
+        """Check if the path/URL is already marked as manually audited in the watch list"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return False
+            
+            for row in range(self._watch_table_model.getRowCount()):
+                table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                
+                # Check if this table entry matches the current request
+                if self._is_match(table_path, path, full_url):
+                    # Check if already manually audited (column 2)
+                    manually_audited = self._watch_table_model.getValueAt(row, 2)  # Manual audited column is now 2
+                    if manually_audited:
+                        return True
+            return False
+        except Exception as e:
+            print("Error checking if already manually audited: {}".format(str(e)))
+            return False
     
     def _is_match(self, pattern, path, full_url):
         """Check if a pattern matches the given path or URL"""
         try:
+            # Normalize URLs by removing default ports for comparison
+            def normalize_url(url):
+                """Remove default ports from URLs for better matching"""
+                import re
+                # Remove :443 from HTTPS URLs and :80 from HTTP URLs
+                normalized = re.sub(r':443(/|$)', r'\1', url)  # Remove :443 for HTTPS
+                normalized = re.sub(r':80(/|$)', r'\1', normalized)  # Remove :80 for HTTP
+                return normalized
+            
+            normalized_pattern = normalize_url(pattern)
+            normalized_full_url = normalize_url(full_url)
+            
             # Convert wildcard pattern to regex
-            regex_pattern = pattern.replace('*', '.*')
+            regex_pattern = normalized_pattern.replace('*', '.*')
             regex_pattern = '^' + regex_pattern + '$'
             
-            # Check against both path and full URL
-            if re.match(regex_pattern, path, re.IGNORECASE) or re.match(regex_pattern, full_url, re.IGNORECASE):
+            # Check against both path and normalized full URL
+            path_match = re.match(regex_pattern, path, re.IGNORECASE)
+            url_match = re.match(regex_pattern, normalized_full_url, re.IGNORECASE)
+            
+            if path_match or url_match:
                 return True
                 
-            # Also check simple substring matching for convenience
-            if pattern.lower() in path.lower() or pattern.lower() in full_url.lower():
+            # Also check simple substring matching for convenience (using normalized URLs)
+            path_substring = normalized_pattern.lower() in path.lower()
+            url_substring = normalized_pattern.lower() in normalized_full_url.lower()
+            
+            if path_substring or url_substring:
                 return True
-                
+                                
         except Exception as e:
             print("Error matching pattern '{}': {}".format(pattern, str(e)))
         
@@ -5916,6 +6444,41 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         except Exception as e:
             print("Error marking vulnerability: {}".format(str(e)))
     
+    def _get_note_for_url(self, url_str):
+        """Get the note for a given URL from the watch list"""
+        try:
+            if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                return ""
+            
+            # Try to find exact URL match first
+            for item in self._data['watch_list_audit']:
+                if isinstance(item, dict) and item.get('path') == url_str:
+                    return item.get('note', '')
+            
+            # If no exact match, try path matching (for backward compatibility)
+            try:
+                # Simple path extraction without urlparse
+                if '://' in url_str:
+                    # Find the path part after the domain
+                    parts = url_str.split('/', 3)
+                    if len(parts) > 3:
+                        path = '/' + parts[3]
+                    else:
+                        path = '/'
+                else:
+                    path = url_str  # Already a path
+                    
+                for item in self._data['watch_list_audit']:
+                    if isinstance(item, dict) and item.get('path') == path:
+                        return item.get('note', '')
+            except:
+                pass
+            
+            return ""  # No note found
+        except Exception as e:
+            print("Error getting note for URL {}: {}".format(url_str, str(e)))
+            return ""
+    
     def _refresh_vulnerability_table(self):
         """Refresh the vulnerability table with current data"""
         try:
@@ -5935,11 +6498,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     if filter_cwe and vuln['cwe'] != filter_cwe:
                         continue
                     
+                    # Get note from watch list for this URL
+                    note = self._get_note_for_url(vuln['url'])
+                    
                     row_data = [
                         vuln['cwe'],
                         vuln['description'],
                         vuln['method'],
                         vuln['url'],
+                        note,
                         vuln['timestamp'],
                         "Remove"
                     ]
@@ -5974,7 +6541,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             cwe = str(self._vuln_table_model.getValueAt(row, 0))
             url = str(self._vuln_table_model.getValueAt(row, 3))
             method = str(self._vuln_table_model.getValueAt(row, 2))
-            timestamp = str(self._vuln_table_model.getValueAt(row, 4))
+            timestamp = str(self._vuln_table_model.getValueAt(row, 5))  # Moved from 4 to 5
             
             # Find and remove the corresponding vulnerability
             with self._vuln_lock:
@@ -6431,6 +6998,9 @@ class CWEMessageEditorTab(IMessageEditorTab):
                                 def getHost(self):
                                     return self.host
                                     
+                                def toString(self):
+                                    return "https://{}{}".format(self.host, self.path)
+                                    
                                 def __str__(self):
                                     return "https://{}{}".format(self.host, self.path)
                                     
@@ -6715,9 +7285,9 @@ class CWEMessageEditorTab(IMessageEditorTab):
             
             table_model = self._extender._watch_table_model
             for row in range(table_model.getRowCount()):
-                table_path = table_model.getValueAt(row, 0)  # Path column
+                table_path = table_model.getValueAt(row, 1)  # Path column is now 1
                 if table_path == display_path:
-                    table_model.setValueAt(note, row, 4)  # Note column
+                    table_model.setValueAt(note, row, 5)  # Note column is now 5
                     print("Updated table note for path {}: '{}'".format(display_path, note))
                     return True
             
@@ -6748,7 +7318,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return False
     
     def _save_note(self, event):
-        """Save the note for the current request to the watch list"""
+        """Save the note for the current request to the watch list (only if request is already in watch list)"""
         if self._current_request_info is None:
             JOptionPane.showMessageDialog(
                 self._component,
@@ -6764,44 +7334,49 @@ class CWEMessageEditorTab(IMessageEditorTab):
             path = url.getPath()
             note_text = self._note_textarea.getText().strip()
             
-            # Find the path in the watch list and update its note
-            # Note: We need to check both full URL and path for backward compatibility
+            # Check if the path exists in the watch list first
             if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
-                updated = False
+                found_in_watch_list = False
                 for item in self._extender._data['watch_list_audit']:
                     if isinstance(item, dict) and (item.get('path') == full_url or item.get('path') == path):
+                        # Found in watch list, update the note
                         item['note'] = note_text
                         item['path'] = full_url  # Update to full URL format
-                        updated = True
+                        found_in_watch_list = True
                         print("Updated note for path: {} -> '{}'".format(full_url, note_text))
                         break
                 
-                if not updated:
-                    # Path not in watch list, add it with the note
-                    self._extender._data['watch_list_audit'].append({
-                        'path': full_url,  # Store full URL
-                        'manual_audited': False,
-                        'scanned': False,
-                        'last_audit': 'Never',
-                        'note': note_text,
-                        'highlight': False
-                    })
-                    print("Added new path with note: {} -> '{}'".format(full_url, note_text))
+                if not found_in_watch_list:
+                    # Request not in watch list, show error
+                    JOptionPane.showMessageDialog(
+                        self._component,
+                        "This request is not in the watch list.\nPlease add it to the watch list first before saving notes.",
+                        "Request Not in Watch List",
+                        JOptionPane.WARNING_MESSAGE
+                    )
+                    return
                 
                 # Save the updated data to database
                 self._extender._save_watch_list_to_database()
                 
-                # Update the table: either update existing row or add new row
-                # Use full URL for internal operations but display format for table
-                if not self._update_table_note_for_path(full_url, note_text):
-                    # Path wasn't in table, add it
-                    self._add_path_to_table(full_url, note_text)
+                # Update the table note
+                self._update_table_note_for_path(full_url, note_text)
+                
+                # Update vulnerability table to reflect note changes
+                self._extender._refresh_vulnerability_table()
                 
                 JOptionPane.showMessageDialog(
                     self._component,
                     "Note saved for path: {}".format(path),
                     "Note Saved",
                     JOptionPane.INFORMATION_MESSAGE
+                )
+            else:
+                JOptionPane.showMessageDialog(
+                    self._component,
+                    "No watch list data available",
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE
                 )
             
         except Exception as e:
@@ -6842,6 +7417,9 @@ class CWEMessageEditorTab(IMessageEditorTab):
                 
                 # Update the specific row in the watch list table
                 self._update_table_note_for_path(full_url, '')
+                
+                # Update vulnerability table to reflect note changes
+                self._extender._refresh_vulnerability_table()
             
         except Exception as e:
             print("Error clearing note from CWE tab: {}".format(str(e)))
@@ -6853,15 +7431,16 @@ class CWEMessageEditorTab(IMessageEditorTab):
         
         try:
             url = self._current_request_info.getUrl()
+            full_url = url.toString()
             path = url.getPath()
             
             # Search for existing note in watch list
             if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
                 for item in self._extender._data['watch_list_audit']:
-                    if isinstance(item, dict) and item.get('path') == path:
+                    if isinstance(item, dict) and (item.get('path') == full_url or item.get('path') == path):
                         note = item.get('note', '')
                         self._note_textarea.setText(note)
-                        print("Loaded note for path {}: '{}'".format(path, note))
+                        print("Loaded note for path {}: '{}'".format(item.get('path'), note))
                         return
             
             # No note found, clear the text area
