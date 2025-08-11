@@ -181,15 +181,6 @@ https://example.com/admin/panel
 - **Data Portability**: Export/import project data between environments
 - **Backup Support**: Automatic data persistence with manual backup options
 
-## Tips & Best Practices
-
-1. **Start with Sitemap Import**: Use sitemap integration to quickly populate your watch list
-2. **Use Project Separation**: Create separate projects for different clients/applications
-3. **Enable Auto-Audit**: Reduce manual overhead by enabling auto-audit for Repeater/Scanner
-4. **Regular Exports**: Export vulnerability data frequently for backup and reporting
-5. **Pattern Optimization**: Use specific patterns to reduce false positives in highlighting
-6. **MIME Filtering**: Exclude static assets to focus on dynamic endpoints
-
 ## Troubleshooting
 
 ### Common Issues
@@ -203,11 +194,3 @@ https://example.com/admin/panel
 - **Use specific patterns**: Avoid overly broad wildcard patterns
 - **Regular cleanup**: Remove completed/irrelevant projects periodically
 - **Monitor memory usage**: Large vulnerability datasets may require more memory
-
-## File Structure
-
-- `vuln_tracker.py` - Main extension file
-- `README.md` - This documentation
-- `INSTALLATION_GUIDE.md` - Detailed setup instructions
-- `path_highlighter_data.json` - Default project data file
-- `default_paths.txt` - Sample path configurations
