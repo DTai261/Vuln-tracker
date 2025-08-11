@@ -1821,11 +1821,38 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # Add the custom tab to Burp's UI
         callbacks.addSuiteTab(self)
         
-        # Start sitemap monitoring if configured
+        # Defer sitemap monitoring startup to prevent initial GUI freeze
         if self._sitemap_config and self._sitemap_config.get("auto_update", False):
-            self._start_sitemap_monitoring()
+            self._defer_sitemap_monitoring_startup()
         
         print("Vuln tracker extension loaded successfully!")
+    
+    def _defer_sitemap_monitoring_startup(self):
+        """Defer sitemap monitoring startup to prevent initial GUI freeze"""
+        try:
+            def startup_task():
+                try:
+                    print("Starting deferred sitemap monitoring...")
+                    # Wait a bit more to ensure GUI is fully initialized
+                    import time
+                    time.sleep(2)
+                    
+                    # Start monitoring
+                    self._start_sitemap_monitoring()
+                    print("Deferred sitemap monitoring started successfully")
+                    
+                except Exception as e:
+                    print("Error in deferred sitemap startup: {}".format(str(e)))
+            
+            # Start monitoring after a delay to let GUI settle
+            monitoring_thread = threading.Thread(target=startup_task)
+            monitoring_thread.daemon = True
+            monitoring_thread.start()
+            
+        except Exception as e:
+            print("Error scheduling deferred sitemap startup: {}".format(str(e)))
+            # Fallback to immediate startup
+            self._start_sitemap_monitoring()
     
     def _create_gui(self):
         """Create the extension's GUI with tabbed interface"""
@@ -4286,7 +4313,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             return False
 
     def _add_endpoints_to_watchlist(self, endpoints):
-        """Add filtered endpoints to the watch list"""
+        """Add filtered endpoints to the watch list with chunked processing to prevent GUI freezing"""
         try:
             if not hasattr(self, '_watch_table_model'):
                 return 0
@@ -4311,40 +4338,128 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         display_url = self._get_display_url(full_url)
                         existing_paths.add(display_url)
             
-            imported_count = 0
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-            
+            # Filter out duplicates first
+            new_endpoints = []
             for endpoint in endpoints:
                 display_endpoint = self._get_display_url(endpoint)
                 if endpoint and display_endpoint not in existing_paths and endpoint not in existing_full_urls:
-                    # Add to table: [Path, Manual Audited (False), Scanned (False), Last Audit, Highlight (False)]
-                    row_data = [display_endpoint, False, False, "Never", False]
-                    self._watch_table_model.addRow(row_data)
-                    
-                    # CRITICAL FIX: Also add to internal data structure with full URL
-                    audit_item = {
-                        'path': endpoint,  # Store full URL in internal data
-                        'manual_audited': False,
-                        'scanned': False,
-                        'last_audit': 'Never',
-                        'note': '',
-                        'highlight': False,
-                        'added': current_time,
-                        'source': 'sitemap'
-                    }
-                    self._data['watch_list_audit'].append(audit_item)
-                    
-                    imported_count += 1
-                    print("Added endpoint to both table and internal data: {}".format(endpoint))
+                    new_endpoints.append(endpoint)
             
-            # Update text area to sync
-            self._sync_table_to_text()
+            if not new_endpoints:
+                return 0
+            
+            print("Processing {} new endpoints from sitemap (chunked processing)".format(len(new_endpoints)))
+            
+            # Process in chunks to prevent GUI freezing
+            chunk_size = 50  # Process 50 endpoints at a time
+            total_imported = 0
+            
+            for i in range(0, len(new_endpoints), chunk_size):
+                chunk = new_endpoints[i:i + chunk_size]
+                chunk_imported = self._add_endpoint_chunk(chunk, i, len(new_endpoints))
+                total_imported += chunk_imported
+                
+                # Small delay between chunks to keep GUI responsive
+                if i + chunk_size < len(new_endpoints):  # Not the last chunk
+                    # Use SwingUtilities to yield to GUI thread
+                    SwingUtilities.invokeLater(lambda: None)
+                    import time
+                    time.sleep(0.1)  # 100ms pause between chunks
+            
+            # Final updates after all chunks processed
+            print("Completed chunked processing: {} endpoints imported".format(total_imported))
+            
+            # Defer heavy operations to prevent freezing
+            self._deferred_sitemap_completion(total_imported)
+            
+            return total_imported
+            
+        except Exception as e:
+            print("Error adding endpoints to watchlist: {}".format(str(e)))
+            import traceback
+            traceback.print_exc()
+            return 0
+    
+    def _add_endpoint_chunk(self, chunk_endpoints, start_index, total_count):
+        """Add a chunk of endpoints to the table and internal data"""
+        try:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            imported_count = 0
+            
+            # Set updating flag to prevent table model events during bulk updates
+            self._is_updating_gui = True
+            
+            for endpoint in chunk_endpoints:
+                display_endpoint = self._get_display_url(endpoint)
+                
+                # Add to table: [#, Path, Manual Audited, Scanned, Last Audit, Note, Highlight]
+                row_number = self._watch_table_model.getRowCount() + 1
+                row_data = [row_number, display_endpoint, False, False, "Never", "", False]
+                self._watch_table_model.addRow(row_data)
+                
+                # Add to internal data structure with full URL
+                audit_item = {
+                    'path': endpoint,  # Store full URL in internal data
+                    'manual_audited': False,
+                    'scanned': False,
+                    'last_audit': 'Never',
+                    'note': '',
+                    'highlight': False,
+                    'added': current_time,
+                    'source': 'sitemap'
+                }
+                self._data['watch_list_audit'].append(audit_item)
+                imported_count += 1
+            
+            # Update row numbers after adding chunk
+            self._update_row_numbers()
+            
+            # Clear updating flag
+            self._is_updating_gui = False
+            
+            # Progress feedback
+            progress = start_index + len(chunk_endpoints)
+            print("Processed chunk: {}/{} endpoints ({:.1f}%)".format(
+                progress, total_count, (progress / total_count) * 100))
             
             return imported_count
             
         except Exception as e:
-            print("Error adding endpoints to watchlist: {}".format(str(e)))
+            print("Error adding endpoint chunk: {}".format(str(e)))
+            self._is_updating_gui = False  # Ensure flag is cleared
             return 0
+    
+    def _deferred_sitemap_completion(self, imported_count):
+        """Deferred completion tasks after sitemap import to prevent GUI freezing"""
+        try:
+            # Use SwingUtilities to defer heavy GUI operations
+            def completion_task():
+                try:
+                    print("Performing deferred sitemap completion tasks...")
+                    
+                    # Update text area (throttled)
+                    self._sync_table_to_text()
+                    
+                    # Save data (throttled)
+                    self._save_watch_list_data()
+                    
+                    # Update status (throttled)
+                    self._update_audit_status_display()
+                    
+                    # Show feedback
+                    if imported_count > 0:
+                        self._show_status_feedback("Imported {} endpoints from sitemap".format(imported_count))
+                    
+                    print("Deferred sitemap completion finished: {} endpoints".format(imported_count))
+                    
+                except Exception as e:
+                    print("Error in deferred sitemap completion: {}".format(str(e)))
+            
+            # Run completion task on GUI thread after a small delay
+            SwingUtilities.invokeLater(completion_task)
+            
+        except Exception as e:
+            print("Error scheduling deferred sitemap completion: {}".format(str(e)))
     
     def _save_sitemap_config(self):
         """Save sitemap configuration to data file"""
@@ -4406,9 +4521,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 last_sitemap_size = 0
                 check_counter = 0
                 
-                # Get monitoring frequency from config
-                monitor_frequency = self._sitemap_config.get("monitor_frequency", 5)
-                full_check_interval = max(6, int(30 / monitor_frequency))  # Ensure full check at least every 30 seconds
+                # Get monitoring frequency from config (default to less aggressive 10 seconds)
+                monitor_frequency = self._sitemap_config.get("monitor_frequency", 10)
+                full_check_interval = max(6, int(60 / monitor_frequency))  # Full check at least every 60 seconds
                 
                 print("DEBUG: Starting sitemap monitoring with {} second intervals".format(monitor_frequency))
                 
@@ -4421,12 +4536,26 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             # Quick size check every iteration to detect changes
                             current_sitemap_size = self._get_sitemap_size()
                             
+                            # Skip auto-update if table is already very large to prevent freeze
+                            if hasattr(self, '_watch_table_model'):
+                                current_table_size = self._watch_table_model.getRowCount()
+                                if current_table_size > 1000:  # Skip if table already has 1000+ entries
+                                    print("DEBUG: Skipping sitemap auto-update - table too large ({} entries)".format(current_table_size))
+                                    time.sleep(monitor_frequency * 3)  # Wait longer before next check
+                                    continue
+                            
                             # If sitemap size changed or periodic full check
                             if (current_sitemap_size > last_sitemap_size or 
                                 check_counter % full_check_interval == 0):
                                 
                                 print("DEBUG: Sitemap monitoring - size changed ({} -> {}) or periodic check (interval: {}s)".format(
                                     last_sitemap_size, current_sitemap_size, monitor_frequency))
+                                
+                                # Additional safeguard: if size difference is huge, warn and throttle
+                                size_diff = current_sitemap_size - last_sitemap_size
+                                if size_diff > 500:
+                                    print("WARNING: Large sitemap change detected ({} new entries). Processing will be throttled.".format(size_diff))
+                                    time.sleep(5)  # Extra delay for large changes
                                 
                                 self._check_sitemap_updates()
                                 last_sitemap_size = current_sitemap_size
@@ -4538,7 +4667,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             return 0
     
     def _check_sitemap_updates(self):
-        """Check for new endpoints in sitemap and add them to watch list"""
+        """Check for new endpoints in sitemap and add them to watch list (optimized for large datasets)"""
         try:
             import time
             
@@ -4592,44 +4721,16 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     if endpoint not in existing_full_urls and display_endpoint not in existing_display_paths:
                         new_endpoints.append(endpoint)
             
-            # Add new endpoints if any
+            # Add new endpoints if any found
             if new_endpoints:
-                print("DEBUG: Adding {} new endpoints".format(len(new_endpoints)))
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                print("DEBUG: Found {} new endpoints - using chunked processing".format(len(new_endpoints)))
                 
-                # Ensure internal data structure exists
-                if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
-                    self._data = {'watch_list_audit': []}
-                
-                for endpoint in new_endpoints:
-                    display_endpoint = self._get_display_url(endpoint)
-                    row_data = [display_endpoint, False, False, "Never", False]
-                    self._watch_table_model.addRow(row_data)
-                    
-                    # CRITICAL FIX: Also add to internal data structure with full URL
-                    audit_item = {
-                        'path': endpoint,  # Store full URL in internal data
-                        'manual_audited': False,
-                        'scanned': False,
-                        'last_audit': 'Never',
-                        'note': '',
-                        'highlight': False,
-                        'added': current_time,
-                        'source': 'sitemap_auto'
-                    }
-                    self._data['watch_list_audit'].append(audit_item)
-                    print("Auto-added endpoint to both table and internal data: {}".format(endpoint))
-                
-                # Update UI and save
-                self._sync_table_to_text()
-                self._save_watch_list_data()
-                self._update_audit_status_display()
+                # Use the same chunked processing as sitemap import to prevent GUI freezing
+                imported_count = self._add_endpoints_to_watchlist_chunked(new_endpoints, is_auto_update=True)
                 
                 print("Auto-imported {} new endpoints from sitemap in {:.2f}s total".format(
-                    len(new_endpoints), time.time() - start_time))
+                    imported_count, time.time() - start_time))
                 
-                # Show notification
-                self._show_status_feedback("Auto-imported {} new endpoints".format(len(new_endpoints)))
             else:
                 print("DEBUG: No new endpoints found (check completed in {:.2f}s)".format(time.time() - start_time))
                 
@@ -4637,6 +4738,116 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error checking sitemap updates: {}".format(str(e)))
             import traceback
             traceback.print_exc()
+    
+    def _add_endpoints_to_watchlist_chunked(self, endpoints, is_auto_update=False):
+        """Add endpoints using chunked processing specifically for auto-updates"""
+        try:
+            if not hasattr(self, '_watch_table_model') or not endpoints:
+                return 0
+            
+            # Ensure internal data structure exists
+            if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
+                self._data = {'watch_list_audit': []}
+            
+            print("Processing {} endpoints with chunked auto-update processing".format(len(endpoints)))
+            
+            # Use smaller chunks for auto-updates to minimize GUI impact
+            chunk_size = 20  # Smaller chunks for background auto-updates
+            total_imported = 0
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            for i in range(0, len(endpoints), chunk_size):
+                chunk = endpoints[i:i + chunk_size]
+                
+                # Set updating flag to prevent table model events during bulk updates
+                self._is_updating_gui = True
+                
+                try:
+                    for endpoint in chunk:
+                        display_endpoint = self._get_display_url(endpoint)
+                        
+                        # Add to table: [#, Path, Manual Audited, Scanned, Last Audit, Note, Highlight]
+                        row_number = self._watch_table_model.getRowCount() + 1
+                        row_data = [row_number, display_endpoint, False, False, "Never", "", False]
+                        self._watch_table_model.addRow(row_data)
+                        
+                        # Add to internal data structure with full URL
+                        audit_item = {
+                            'path': endpoint,  # Store full URL in internal data
+                            'manual_audited': False,
+                            'scanned': False,
+                            'last_audit': 'Never',
+                            'note': '',
+                            'highlight': False,
+                            'added': current_time,
+                            'source': 'sitemap_auto'
+                        }
+                        self._data['watch_list_audit'].append(audit_item)
+                        total_imported += 1
+                    
+                    # Update row numbers for this chunk
+                    self._update_row_numbers()
+                    
+                finally:
+                    # Always clear updating flag
+                    self._is_updating_gui = False
+                
+                # Longer pause between chunks for auto-updates to stay out of the way
+                if i + chunk_size < len(endpoints):  # Not the last chunk
+                    import time
+                    time.sleep(0.2)  # 200ms pause for auto-updates
+                    
+                    # Yield to GUI thread
+                    SwingUtilities.invokeLater(lambda: None)
+            
+            # Deferred completion for auto-updates (less frequent saves)
+            if total_imported > 0:
+                self._deferred_auto_update_completion(total_imported)
+            
+            return total_imported
+            
+        except Exception as e:
+            print("Error in chunked auto-update processing: {}".format(str(e)))
+            self._is_updating_gui = False  # Ensure flag is cleared
+            return 0
+    
+    def _deferred_auto_update_completion(self, imported_count):
+        """Deferred completion for auto-updates with throttled saves"""
+        try:
+            def completion_task():
+                try:
+                    current_time = time.time()
+                    
+                    # Throttle saves for auto-updates (only save every 60 seconds)
+                    if not hasattr(self, '_last_auto_save') or current_time - self._last_auto_save > 60:
+                        self._save_watch_list_data()
+                        self._last_auto_save = current_time
+                        print("Auto-update: Saved data to disk")
+                    
+                    # Throttle status updates (only update every 30 seconds)
+                    if not hasattr(self, '_last_auto_status') or current_time - self._last_auto_status > 30:
+                        self._update_audit_status_display()
+                        self._last_auto_status = current_time
+                        print("Auto-update: Updated status display")
+                    
+                    # Always sync text area but throttle it too
+                    if not hasattr(self, '_last_auto_sync') or current_time - self._last_auto_sync > 45:
+                        self._sync_table_to_text()
+                        self._last_auto_sync = current_time
+                        print("Auto-update: Synced table to text")
+                    
+                    # Minimal feedback for auto-updates
+                    if imported_count > 0:
+                        print("Auto-update completed: {} new endpoints added".format(imported_count))
+                    
+                except Exception as e:
+                    print("Error in auto-update completion: {}".format(str(e)))
+            
+            # Delay completion task to avoid interfering with user activities
+            SwingUtilities.invokeLater(completion_task)
+            
+        except Exception as e:
+            print("Error scheduling auto-update completion: {}".format(str(e)))
     
     def _export_watch_list(self, event):
         """Export watch list to a file"""
