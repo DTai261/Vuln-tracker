@@ -983,8 +983,19 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Store the final audit data in self._data
             self._data['watch_list_audit'] = watch_list_audit
             
-            # Load vuln counter
-            self._vuln_counter = max(self._vuln_counter, data.get("vuln_counter", 0))
+            # Load vuln counter and migrate to new system if needed
+            if "max_vuln_id" in data:
+                # New system: use max_vuln_id for ID generation
+                self._vuln_counter = data.get("max_vuln_id", 0)
+            else:
+                # Old system: migrate existing data
+                self._vuln_counter = max(self._vuln_counter, data.get("vuln_counter", 0))
+                # Set max_vuln_id to current counter value for future use
+                data["max_vuln_id"] = self._vuln_counter
+                # Update vuln_counter to actual count
+                data["vuln_counter"] = len(data.get("vulnerabilities", {}))
+                # Save the migrated data
+                self._save_data_to_file(data)
             
             # Load auto-audit settings
             settings = data.get("settings", {})
@@ -1334,8 +1345,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 'request_hash': vulnerability['request_hash']
             }
             
-            # Update counter
-            data["vuln_counter"] = max(data.get("vuln_counter", 0), vuln_id)
+            # Update the max ID for generating unique IDs
+            if "max_vuln_id" not in data:
+                data["max_vuln_id"] = data.get("vuln_counter", 0)
+            data["max_vuln_id"] = max(data.get("max_vuln_id", 0), vuln_id)
+            
+            # Update counter to reflect actual count
+            data["vuln_counter"] = len(data["vulnerabilities"])
             
             self._save_data_to_file(data)
             
@@ -1343,13 +1359,24 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error saving vulnerability to file: {}".format(str(e)))
     
     def _remove_vulnerability_from_database(self, vuln_id):
-        """Remove a vulnerability from JSON file"""
+        """Remove a vulnerability from JSON file and update counters"""
         try:
             data = self._load_data_from_file()
             
             # Remove vulnerability
             if str(vuln_id) in data["vulnerabilities"]:
                 del data["vulnerabilities"][str(vuln_id)]
+                
+                # Update the vuln_counter to reflect actual count (for user display)
+                # Keep the ID generator separate by using max_vuln_id
+                actual_count = len(data["vulnerabilities"])
+                
+                # Preserve the max ID for generating new unique IDs
+                if "max_vuln_id" not in data:
+                    data["max_vuln_id"] = data.get("vuln_counter", 0)
+                
+                # Update vuln_counter to show actual count
+                data["vuln_counter"] = actual_count
             
             self._save_data_to_file(data)
             
@@ -2485,7 +2512,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 break
                         
                         if not is_duplicate:
-                            # Create unique vulnerability ID
+                            # Create unique vulnerability ID using internal counter
                             self._vuln_counter += 1
                             vuln_id = self._vuln_counter
                             
@@ -2922,9 +2949,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     description = self._vuln_table_model.getValueAt(row, 1)
                     method = self._vuln_table_model.getValueAt(row, 2)
                     url = self._vuln_table_model.getValueAt(row, 3)
-                    timestamp = self._vuln_table_model.getValueAt(row, 4)
+                    timestamp = self._vuln_table_model.getValueAt(row, 5)  # Fixed: timestamp is column 5, not 4
                     
                     # Find matching vulnerability ID
+                    vuln_found = False
                     with self._vuln_lock:
                         for vuln_id, vuln_data in self._vulnerabilities.items():
                             if (vuln_data.get('cwe') == cwe and 
@@ -2933,23 +2961,43 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 vuln_data.get('url') == url and
                                 vuln_data.get('timestamp') == timestamp):
                                 vuln_ids_to_delete.append(vuln_id)
+                                vuln_found = True
+                                print("DEBUG: Found vulnerability ID {} for deletion".format(vuln_id))
                                 break
+                    
+                    if not vuln_found:
+                        print("WARNING: Could not find vulnerability for row {} with data: CWE={}, URL={}, timestamp={}".format(
+                            row, cwe, url, timestamp))
+                
+                print("DEBUG: Found {} vulnerabilities to delete out of {} selected rows".format(
+                    len(vuln_ids_to_delete), len(selected_rows)))
                 
                 # Remove rows in reverse order to maintain indices
                 for row in sorted(selected_rows, reverse=True):
                     self._vuln_table_model.removeRow(row)
                 
                 # Remove from internal vulnerability list and database
+                deleted_count = 0
                 with self._vuln_lock:
                     for vuln_id in vuln_ids_to_delete:
                         if vuln_id in self._vulnerabilities:
                             del self._vulnerabilities[vuln_id]
+                            print("DEBUG: Removed vulnerability {} from memory".format(vuln_id))
+                        
+                        # Remove from database file
                         self._remove_vulnerability_from_database(vuln_id)
+                        deleted_count += 1
+                        print("DEBUG: Removed vulnerability {} from database".format(vuln_id))
+                
+                print("DEBUG: Successfully deleted {} vulnerabilities from database".format(deleted_count))
                 
                 # Update vulnerability stats
                 self._update_vulnerability_stats()
                 
-                self._show_status_feedback("Deleted {} vulnerability(ies)".format(len(selected_rows)))
+                if deleted_count > 0:
+                    self._show_status_feedback("Deleted {} vulnerability(ies) - changes saved to file".format(deleted_count))
+                else:
+                    self._show_status_feedback("Warning: No vulnerabilities were deleted from database")
                 
         except Exception as e:
             print("Error deleting selected vulnerabilities: {}".format(str(e)))
@@ -2977,7 +3025,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if result == JOptionPane.YES_OPTION:
                 # Find and remove the vulnerability
                 method = self._vuln_table_model.getValueAt(row, 2)
-                timestamp = self._vuln_table_model.getValueAt(row, 4)
+                timestamp = self._vuln_table_model.getValueAt(row, 5)  # Fixed: timestamp is column 5, not 4
                 
                 # Find matching vulnerability ID
                 vuln_id_to_remove = None
@@ -6765,7 +6813,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         ))
                         return
                 
-                # Create unique vulnerability ID
+                # Create unique vulnerability ID using internal counter
                 self._vuln_counter += 1
                 vuln_id = self._vuln_counter
                 
@@ -7810,7 +7858,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
                         )
                         return
                 
-                # Create unique vulnerability ID
+                # Create unique vulnerability ID using internal counter
                 self._extender._vuln_counter += 1
                 vuln_id = self._extender._vuln_counter
                 
