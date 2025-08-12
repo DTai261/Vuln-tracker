@@ -199,7 +199,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     self._watch_table_model.setValueAt(str(row + 1), row, 0)  # Column 0 is the # column
                 # Clear flag
                 self._is_updating_gui = False
-                print("Row number update completed - GUI update mode disabled, saving re-enabled")
         except Exception as e:
             print("Error updating row numbers: {}".format(str(e)))
             # Ensure flag is cleared even on error
@@ -215,7 +214,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Use current project's data file
             self._data_file_path = self._get_current_project_data_file()
-            print("Data will be stored at: {}".format(self._data_file_path))
             
             # Create initial data structure if file doesn't exist
             if not os.path.exists(self._data_file_path):
@@ -274,8 +272,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Auto-detect current Burp project name
             self._current_project_name = self._detect_current_burp_project()
             
-            print("Project mapping initialized. Current project: '{}'. Available projects: {}".format(
-                self._current_project_name, list(self._project_mappings.keys())))
             
         except Exception as e:
             print("Error initializing project mapping: {}".format(str(e)))
@@ -309,7 +305,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             continue
                 
                 if most_recent_project:
-                    print("Found existing projects. Most recent: '{}'".format(most_recent_project))
                     
                     # Ask user if they want to use the most recent project or create a new one
                     choice = self._ask_project_choice(most_recent_project)
@@ -326,7 +321,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     # If choice is "create_new" or selection failed, continue to create new project
             
             # Method 2: No existing projects or user wants to create new - prompt for project setup
-            print("Setting up new project...")
             project_info = self._prompt_for_new_project_setup()
             
             if project_info:
@@ -336,7 +330,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Create new project entry
                 self._create_new_project_entry_with_path(project_name, data_file_path)
                 
-                print("New project created: '{}' -> '{}'".format(project_name, data_file_path))
                 return project_name
             
             # Fallback - create a default project with prompted location
@@ -421,7 +414,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             return str(selected) if selected else None
             
         except Exception as e:
-            print("Error selecting existing project: {}".format(str(e)))
             return None
     
     def _prompt_for_new_project_setup(self):
@@ -551,7 +543,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             }
             
             self._save_project_mappings()
-            print("Created new project entry: {} -> {}".format(safe_project_name, data_file_path))
             
             return safe_project_name
             
@@ -609,7 +600,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             self._create_new_project_entry_with_path(project_name, data_file)
             
-            print("Created emergency fallback project: {} -> {}".format(project_name, data_file))
             return project_name
             
         except Exception as e:
@@ -681,7 +671,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             if not os.path.exists(self._project_mapping_file):
                 # Start with empty mappings - projects will be created on demand
-                print("No existing project mappings found. Will create on first use.")
                 return {}
             
             with open(self._project_mapping_file, 'r') as f:
@@ -771,7 +760,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             }
             
             self._save_project_mappings()
-            print("Created new project entry: {} -> {}".format(safe_project_name, data_file_path))
             
             return data_file_path
             
@@ -1028,12 +1016,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Successfully loaded {} vulnerabilities and {} paths from data file".format(
                 loaded_vuln_count, loaded_paths_count))
             
-            # Debug: Check if we have audit data
-            if 'watch_list_audit' in data:
-                print("Found {} items in watch_list_audit".format(len(data['watch_list_audit'])))
-            else:
-                print("No watch_list_audit found in data")
-            
+                        
         except Exception as e:
             print("Error loading data from file: {}".format(str(e)))
             traceback.print_exc()
@@ -1832,14 +1815,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             def startup_task():
                 try:
-                    print("Starting deferred sitemap monitoring...")
                     # Wait a bit more to ensure GUI is fully initialized
                     import time
                     time.sleep(2)
                     
                     # Start monitoring
                     self._start_sitemap_monitoring()
-                    print("Deferred sitemap monitoring started successfully")
                     
                 except Exception as e:
                     print("Error in deferred sitemap startup: {}".format(str(e)))
@@ -2659,6 +2640,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         self._sample_button = JButton("Load Sample Paths", actionPerformed=self._load_sample)
         text_button_panel.add(self._sample_button)
         
+        # Fetch from Sitemap button
+        self._fetch_sitemap_button = JButton("Fetch from Sitemap", actionPerformed=self._fetch_from_sitemap_immediate)
+        self._fetch_sitemap_button.setToolTipText("Immediately import new endpoints from sitemap using current configuration")
+        text_button_panel.add(self._fetch_sitemap_button)
+        
         text_panel.add(text_button_panel, BorderLayout.SOUTH)
         
         parent_pane.addTab("Text Editor", text_panel)
@@ -3053,7 +3039,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             # Set flag to prevent saving during GUI update
             self._is_updating_gui = True
-            print("Starting GUI update - saving disabled to prevent data overwrite")
             
             # Update watch paths text area from watch_list_audit
             if hasattr(self, '_data') and self._data.get('watch_list_audit'):
@@ -3066,7 +3051,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Update watch list table with audit status if available
             if hasattr(self, '_watch_table_model') and hasattr(self, '_data'):
-                print("Updating table with data. Table model exists: True, Data exists: True")
                 
                 # Set flag to prevent table model listener from firing during population
                 self._is_updating_gui = True
@@ -3086,7 +3070,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Load audit data if available
                 if 'watch_list_audit' in self._data and self._data['watch_list_audit']:
-                    print("Loading {} audit items into table".format(len(self._data['watch_list_audit'])))
                     # Load from detailed audit data
                     row_number = 1
                     for item in self._data['watch_list_audit']:
@@ -3103,10 +3086,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             row_data = [str(row_number), display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
                             row_number += 1
-                            print("Added to table: {} (manual: {}, scanned: {}, last audit: {}, note: '{}', highlight: {})".format(
-                                display_path, manual_audited, scanned, last_audit, note, highlight))
                 elif hasattr(self, '_data') and self._data.get('watch_list_audit'):
-                    print("Creating table entries from watch list audit data")
                     # Fallback: create table entries from watch list audit data
                     row_number = 1
                     for item in self._data['watch_list_audit']:
@@ -3122,9 +3102,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             row_data = [str(row_number), display_path, manual_audited, scanned, last_audit, note, highlight]
                             self._watch_table_model.addRow(row_data)
                             row_number += 1
-                            print("Added to table (fallback): {}".format(display_path))
                 else:
-                    print("No path data found to populate table")
+                    pass
                 
                 # Update status with audit counts
                 total_paths = self._watch_table_model.getRowCount()
@@ -3136,9 +3115,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     
                     self._status_label.setText("Ready - {} paths ({} audited, {} pending)".format(
                         total_paths, audited_count, total_paths - audited_count))
-                    print("Table populated with {} paths ({} audited)".format(total_paths, audited_count))
                 else:
-                    print("Table is empty after update attempt")
+                    pass
                 
                 # Enhanced table refresh - fire multiple events to ensure GUI updates
                 try:
@@ -3150,7 +3128,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     if hasattr(self, '_watch_table'):
                         SwingUtilities.invokeLater(lambda: self._watch_table.revalidate())
                         SwingUtilities.invokeLater(lambda: self._watch_table.repaint())
-                        print("Forced table component refresh")
                 except Exception as table_error:
                     print("Error firing table events: {}".format(str(table_error)))
             else:
@@ -3193,11 +3170,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     pass
             
             # Get path count from watch_list_audit
-            path_count = len(self._data.get('watch_list_audit', [])) if hasattr(self, '_data') else 0
-            print("GUI updated with loaded data: {} paths, {} vulnerabilities".format(
-                path_count, len(self._vulnerabilities)))
-            print("Project switch complete: Configuration and paths loaded for project '{}'".format(
-                getattr(self, '_current_project_name', 'Unknown')))
+            # path_count = len(self._data.get('watch_list_audit', [])) if hasattr(self, '_data') else 0
+            # print("GUI updated with loaded data: {} paths, {} vulnerabilities".format(
+            #     path_count, len(self._vulnerabilities)))
+            # print("Project switch complete: Configuration and paths loaded for project '{}'".format(
+            #     getattr(self, '_current_project_name', 'Unknown')))
             
             # Clear the flag to re-enable saving
             self._is_updating_gui = False
@@ -3386,81 +3363,96 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error refreshing table display: {}".format(str(e)))
     
     def _update_paths(self, event):
-        """Update the path list from the text area"""
+        """Update the path list from the text area - optimized to prevent UI freezing"""
         try:
-            text = self._path_textarea.getText()
-            raw_path_list = [line.strip() for line in text.split('\n') if line.strip()]
+            # Set updating flag to prevent events during processing
+            self._is_updating_gui = True
             
-            if not raw_path_list:
-                # Clear the watch list if no paths provided
+            try:
+                text = self._path_textarea.getText()
+                raw_path_list = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                if not raw_path_list:
+                    # Clear the watch list if no paths provided
+                    if not hasattr(self, '_data'):
+                        self._data = {}
+                    self._data['watch_list_audit'] = []
+                    
+                    if hasattr(self, '_watch_table_model'):
+                        # Clear table efficiently
+                        self._watch_table_model.setRowCount(0)
+                        self._save_watch_list_data()
+                    
+                    self._status_label.setText("Ready - 0 paths in watch list")
+                    self._update_audit_status_display()
+                    return
+                
+                # Show progress feedback
+                self._status_label.setText("Processing {} paths...".format(len(raw_path_list)))
+                
+                # Validate and convert paths to full URLs if needed
+                validated_path_list = self._validate_and_convert_paths(raw_path_list)
+                
+                if not validated_path_list:
+                    # User cancelled or validation failed
+                    self._status_label.setText("Update cancelled")
+                    return
+                
+                # Update watch_list_audit with validated paths
                 if not hasattr(self, '_data'):
                     self._data = {}
+                
+                # Create new watch list audit data with CORRECT default values
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
                 self._data['watch_list_audit'] = []
+                for path in validated_path_list:
+                    self._data['watch_list_audit'].append({
+                        'path': path,
+                        'manual_audited': False,  # NEW PATHS: NOT manually audited
+                        'scanned': False,         # NEW PATHS: NOT scanned
+                        'last_audit': 'Never',
+                        'highlight': False,
+                        'note': '',
+                        'added': current_time,
+                        'source': 'text_update'
+                    })
                 
+                # Update the text area with the validated full URLs
+                self._path_textarea.setText('\n'.join(validated_path_list))
+                
+                # Sync to table if it exists (this will use the optimized sync function)
                 if hasattr(self, '_watch_table_model'):
-                    # Clear table
-                    while self._watch_table_model.getRowCount() > 0:
-                        self._watch_table_model.removeRow(0)
+                    self._sync_text_to_table()
+                    # Save watch list data with audit status
                     self._save_watch_list_data()
+                else:
+                    # Fallback: save using the new method
+                    def save_in_background():
+                        try:
+                            self._save_watch_list_to_database()
+                        except Exception as e:
+                            print("Error saving watch list in background: {}".format(str(e)))
+                    
+                    # Run save operation in background thread
+                    save_thread = threading.Thread(target=save_in_background)
+                    save_thread.daemon = True
+                    save_thread.start()
                 
-                self._status_label.setText("Ready - 0 paths in watch list")
-                return
-            
-            # Validate and convert paths to full URLs if needed
-            validated_path_list = self._validate_and_convert_paths(raw_path_list)
-            
-            if not validated_path_list:
-                # User cancelled or validation failed
-                return
-            
-            # Update watch_list_audit with validated paths
-            if not hasattr(self, '_data'):
-                self._data = {}
-            
-            # Create new watch list audit data
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-            self._data['watch_list_audit'] = []
-            for path in validated_path_list:
-                self._data['watch_list_audit'].append({
-                    'path': path,
-                    'manual_audited': False,
-                    'scanned': False,
-                    'last_audit': 'Never',
-                    'highlight': False,
-                    'note': ''
-                })
-            
-            # Update the text area with the validated full URLs
-            self._path_textarea.setText('\n'.join(validated_path_list))
-            
-            # Sync to table if it exists
-            if hasattr(self, '_watch_table_model'):
-                self._sync_text_to_table()
-                # Save watch list data with audit status
-                self._save_watch_list_data()
-            else:
-                # Fallback: save using the new method
-                def save_in_background():
-                    try:
-                        self._save_watch_list_to_database()
-                    except Exception as e:
-                        print("Error saving watch list in background: {}".format(str(e)))
+                # Update status and progress
+                count = len(validated_path_list)
+                self._status_label.setText("Ready - {} path(s) in watch list".format(count))
+                self._update_audit_status_display()
                 
-                # Run save operation in background thread
-                save_thread = threading.Thread(target=save_in_background)
-                save_thread.daemon = True
-                save_thread.start()
-            
-            # Update status
-            count = len(validated_path_list)
-            self._status_label.setText("Ready - {} path(s) in watch list".format(count))
-            
-            print("Watch list updated: {} paths loaded".format(count))
-            for path in validated_path_list:
-                print("  - {}".format(path))
+                # Show brief success feedback
+                SwingUtilities.invokeLater(lambda: self._show_status_feedback("Watch list updated with {} paths".format(count)))
+                
+            finally:
+                # Always clear the updating flag
+                self._is_updating_gui = False
             
         except Exception as e:
             print("Error updating paths: {}".format(str(e)))
+            self._is_updating_gui = False
             JOptionPane.showMessageDialog(
                 self._main_panel,
                 "Error updating watch list: {}".format(str(e)),
@@ -3531,6 +3523,48 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 "Error",
                 JOptionPane.ERROR_MESSAGE
             )
+    
+    def _fetch_from_sitemap_immediate(self, event):
+        """Immediately fetch and import data from sitemap based on current configuration"""
+        try:
+            # Check if sitemap config exists
+            if not hasattr(self, '_sitemap_config') or not self._sitemap_config:
+                self._show_status_feedback("No sitemap configuration found. Please configure sitemap settings first.")
+                return
+            
+            self._show_status_feedback("Fetching data from sitemap...")
+            
+            # Extract sitemap data using current configuration
+            sitemap_data = self._extract_sitemap_data(self._sitemap_config)
+            if not sitemap_data:
+                self._show_status_feedback("No sitemap data found for target: {}".format(
+                    self._sitemap_config.get("target", "Unknown")))
+                return
+            
+            # Filter endpoints using current configuration
+            filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, self._sitemap_config)
+            if not filtered_endpoints:
+                self._show_status_feedback("No endpoints found after filtering")
+                return
+            
+            # Add new endpoints to watchlist
+            imported_count = self._add_endpoints_to_watchlist(filtered_endpoints)
+            
+            if imported_count > 0:
+                self._show_status_feedback("Successfully imported {} new endpoints from sitemap".format(imported_count))
+                
+                # Refresh the text area to show newly added paths
+                if hasattr(self, '_path_textarea'):
+                    self._sync_table_to_text()
+            else:
+                self._show_status_feedback("No new endpoints found - all sitemap URLs already in watch list")
+            
+        except Exception as e:
+            error_msg = "Error fetching from sitemap: {}".format(str(e))
+            print("ERROR: {}".format(error_msg))
+            import traceback
+            traceback.print_exc()
+            self._show_status_feedback("{}".format(error_msg))
     
     def _import_watch_list(self, event):
         """Import watch list from a file"""
@@ -3657,8 +3691,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _import_from_sitemap(self, event):
         """Import endpoints from Burp's Target sitemap with configuration dialog"""
         try:
-            print("\n=== SITEMAP IMPORT STARTED ===")
-            
             # Debug: Check basic requirements
             if not hasattr(self, '_callbacks'):
                 print("ERROR: _callbacks not found!")
@@ -3671,7 +3703,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Quick test of sitemap access
             try:
                 test_sitemap = self._callbacks.getSiteMap(None)
-                print("DEBUG: Sitemap test returned {} entries".format(len(test_sitemap) if test_sitemap else 0))
+                if test_sitemap:
+                    pass  # Sitemap is accessible
             except Exception as e:
                 print("ERROR: Cannot access sitemap - {}".format(str(e)))
                 return
@@ -3686,17 +3719,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("DEBUG: Configuration received - Target: {}".format(config.get("target", "None")))
             
             # Get sitemap data from Burp
-            print("DEBUG: Extracting sitemap data...")
             sitemap_data = self._extract_sitemap_data(config)
             if not sitemap_data:
-                print("DEBUG: No sitemap data returned")
                 self._show_status_feedback("No endpoints found in sitemap for target")
                 return
             
-            print("DEBUG: Got {} sitemap entries".format(len(sitemap_data)))
             
             # Process and filter the endpoints
-            print("DEBUG: Filtering endpoints...")
             filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, config)
             if not filtered_endpoints:
                 print("DEBUG: No endpoints passed filtering")
@@ -3718,17 +3747,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 self._start_sitemap_monitoring()
             
             # Save and update UI
-            print("DEBUG: Saving data and updating UI...")
             self._save_watch_list_data()
             self._update_audit_status_display()
             
             # Show feedback
             auto_update_msg = " (auto-update enabled)" if config.get("auto_update", False) else ""
             success_msg = "Imported {} endpoints from sitemap{}".format(imported_count, auto_update_msg)
-            print("SUCCESS: {}".format(success_msg))
             self._show_status_feedback(success_msg)
-            
-            print("=== SITEMAP IMPORT COMPLETED ===\n")
             
         except Exception as e:
             error_msg = "Error importing from sitemap: {}".format(str(e))
@@ -3807,9 +3832,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             dialog_panel.add(auto_update_checkbox, gbc)
             
             # Instructions
-            gbc.gridy = 5
-            instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'")
-            dialog_panel.add(instructions, gbc)
+            # gbc.gridy = 5
+            # instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'")
+            # dialog_panel.add(instructions, gbc)
             
             # Show dialog
             result = JOptionPane.showConfirmDialog(
@@ -3850,7 +3875,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Try to get sitemap for all URLs (pass None to get all)
                 print("Attempting to get sitemap data...")
                 site_map = self._callbacks.getSiteMap(None)
-                print("Got {} sitemap entries".format(len(site_map) if site_map else 0))
                 
                 if site_map:
                     for message_info in site_map:
@@ -3872,7 +3896,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                         full_url = "{}://{}:{}".format(protocol, host, port)
                                     
                                     targets.add(full_url)
-                                    print("Added target: {}".format(full_url))
                             except Exception as e:
                                 print("Error processing sitemap entry: {}".format(str(e)))
                                 continue
@@ -3909,7 +3932,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 continue
             
             target_list = sorted(list(targets)) if targets else []
-            print("Final targets found: {}".format(target_list))
             return target_list
             
         except Exception as e:
@@ -3920,7 +3942,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         """Extract sitemap data for the specified target"""
         try:
             target_url = config["target"]
-            print("Extracting sitemap data for target: {}".format(target_url))
             sitemap_data = []
             
             # Parse the full URL (schema://host:port)
@@ -3961,9 +3982,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     host = target_url
                     port = -1
                     protocol = "https"  # Default to HTTPS
-            
-            print("Parsed target - Protocol: {}, Host: {}, Port: {}".format(protocol, host, port))
-            
+                        
             # Get sitemap entries for the target
             if hasattr(self._callbacks, 'getSiteMap'):
                 # Build URL pattern for the exact target
@@ -3979,15 +3998,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 else:
                     # Custom port
                     base_url = "{}://{}:{}".format(protocol, host, port)
-                
-                print("Getting sitemap for: {}".format(base_url))
-                
+                                
                 try:
                     site_map = self._callbacks.getSiteMap(base_url)
                     
                     if site_map:
-                        print("Found {} entries for {}".format(len(site_map), base_url))
-                        
+                        # Found entries - process them silently
                         for message_info in site_map:
                             if message_info:
                                 try:
@@ -4038,17 +4054,39 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                     print("Error processing sitemap entry: {}".format(str(e)))
                                     continue
                     else:
-                        print("No sitemap entries found for {}".format(base_url))
+                        pass
                         
                 except Exception as e:
                     print("Error getting sitemap for {}: {}".format(base_url, str(e)))
             
-            print("Total extracted {} entries from sitemap for target {}".format(len(sitemap_data), target_url))
             return sitemap_data
             
         except Exception as e:
             print("Error extracting sitemap data: {}".format(str(e)))
             return []
+    
+    def _normalize_sitemap_url(self, url):
+        """Normalize URL from sitemap by removing default ports to match request URLs"""
+        try:
+            protocol = url.getProtocol()
+            host = url.getHost()
+            port = url.getPort()
+            path = url.getPath() if url.getPath() else "/"
+            
+            # Build normalized URL without default ports
+            if (protocol == "http" and port == 80) or (protocol == "https" and port == 443):
+                # Remove default port
+                normalized_url = "{}://{}{}".format(protocol, host, path)
+            else:
+                # Keep non-default port
+                normalized_url = "{}://{}:{}{}".format(protocol, host, port, path)
+            
+            return normalized_url
+            
+        except Exception as e:
+            print("Error normalizing sitemap URL: {}".format(str(e)))
+            # Fallback to string conversion
+            return str(url)
     
     def _filter_sitemap_endpoints(self, sitemap_data, config):
         """Filter sitemap endpoints based on configuration"""
@@ -4059,11 +4097,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             exclude_status_codes = config.get("exclude_status_codes", [])
             exclude_mime_types = config.get("exclude_mime_types", [])
             
-            print("DEBUG: Filtering {} entries with config:".format(len(sitemap_data)))
-            print("  Exclude MIME types: {}".format(exclude_mime_types))
-            print("  Exclude extensions: {}".format(exclude_extensions))
-            print("  Exclude status codes: {}".format(exclude_status_codes))
-            
             for entry in sitemap_data:
                 url = entry["url"]
                 path = entry["path"]
@@ -4073,39 +4106,31 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Remove query parameters for uniqueness
                 clean_path = path.split("?")[0] if "?" in path else path
                 
-                # Create full URL from the URL object
-                full_url = str(url)
+                # Create full URL from the URL object and normalize it
+                full_url = self._normalize_sitemap_url(url)
                 # Remove query parameters from full URL for uniqueness 
                 if "?" in full_url:
                     full_url = full_url.split("?")[0]
-                
-                print("DEBUG: Processing entry: {} (status: {})".format(full_url, status_code))
-                
+                                
                 # Check status code exclusion
                 if status_code in exclude_status_codes:
-                    print("DEBUG: Excluding {} due to status code {}".format(full_url, status_code))
                     continue
                 
                 # Check file extension exclusion (check against path only)
                 if self._has_excluded_extension(clean_path, exclude_extensions):
-                    print("DEBUG: Excluding {} due to file extension".format(full_url))
                     continue
                 
                 # Check pattern exclusion (check against path only)
                 if self._matches_exclude_pattern(clean_path, exclude_patterns):
-                    print("DEBUG: Excluding {} due to path pattern".format(full_url))
                     continue
                 
                 # Check MIME type exclusion
                 if self._has_excluded_mime_type(response, exclude_mime_types):
-                    print("DEBUG: Excluding {} due to MIME type".format(full_url))
                     continue
                 
                 # Add to filtered set (ensures uniqueness) - store full URL now
                 filtered_endpoints.add(full_url)
-                print("DEBUG: Including {} in filtered results".format(full_url))
             
-            print("Filtered {} unique endpoints from {} total entries".format(len(filtered_endpoints), len(sitemap_data)))
             return list(filtered_endpoints)
             
         except Exception as e:
@@ -4218,8 +4243,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             for excluded_mime in exclude_mime_types:
                                 excluded_mime_lower = excluded_mime.strip().lower()
                                 if self._mime_type_matches(mime_type, excluded_mime_lower):
-                                    print("DEBUG: Excluding response due to Content-Type {} matching filter {}".format(
-                                        content_type, excluded_mime_lower))
                                     return True
                                     
                 except Exception as header_error:
@@ -4492,12 +4515,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             if config:
                 self._sitemap_config = config
-                print("Loaded sitemap configuration for target: {}".format(config.get('target', 'unknown')))
-                print("  Exclude patterns: {}".format(config.get('exclude_patterns', [])))
-                print("  Exclude extensions: {}".format(config.get('exclude_extensions', [])))
                 return config
             else:
-                print("No sitemap configuration found in data file")
+                pass  # No sitemap configuration found
                     
         except Exception as e:
             print("Error loading sitemap config: {}".format(str(e)))
@@ -4524,9 +4544,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Get monitoring frequency from config (default to less aggressive 10 seconds)
                 monitor_frequency = self._sitemap_config.get("monitor_frequency", 10)
                 full_check_interval = max(6, int(60 / monitor_frequency))  # Full check at least every 60 seconds
-                
-                print("DEBUG: Starting sitemap monitoring with {} second intervals".format(monitor_frequency))
-                
+                                
                 while self._sitemap_config and self._sitemap_config.get("auto_update", False):
                     try:
                         time.sleep(monitor_frequency)  # Use configured frequency
@@ -4540,17 +4558,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             if hasattr(self, '_watch_table_model'):
                                 current_table_size = self._watch_table_model.getRowCount()
                                 if current_table_size > 1000:  # Skip if table already has 1000+ entries
-                                    print("DEBUG: Skipping sitemap auto-update - table too large ({} entries)".format(current_table_size))
                                     time.sleep(monitor_frequency * 3)  # Wait longer before next check
                                     continue
                             
                             # If sitemap size changed or periodic full check
                             if (current_sitemap_size > last_sitemap_size or 
                                 check_counter % full_check_interval == 0):
-                                
-                                print("DEBUG: Sitemap monitoring - size changed ({} -> {}) or periodic check (interval: {}s)".format(
-                                    last_sitemap_size, current_sitemap_size, monitor_frequency))
-                                
+                                                                
                                 # Additional safeguard: if size difference is huge, warn and throttle
                                 size_diff = current_sitemap_size - last_sitemap_size
                                 if size_diff > 500:
@@ -4561,14 +4575,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 last_sitemap_size = current_sitemap_size
                             
                     except Exception as e:
-                        print("Error in sitemap monitoring: {}".format(str(e)))
                         break
             
             self._sitemap_monitor_thread = threading.Thread(target=monitor_sitemap)
             self._sitemap_monitor_thread.daemon = True
             self._sitemap_monitor_thread.start()
             
-            print("Started sitemap monitoring for target: {}".format(self._sitemap_config.get('target', 'unknown')))
             
         except Exception as e:
             print("Error starting sitemap monitoring: {}".format(str(e)))
@@ -4585,7 +4597,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 import time
                 time.sleep(1)
                 
-                print("Stopped sitemap monitoring")
                 
         except Exception as e:
             print("Error stopping sitemap monitoring: {}".format(str(e)))
@@ -4674,25 +4685,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if not self._sitemap_config:
                 return
             
-            print("DEBUG: Checking for sitemap updates...")
             start_time = time.time()
             
             # Get current sitemap data
             sitemap_data = self._extract_sitemap_data(self._sitemap_config)
             if not sitemap_data:
-                print("DEBUG: No sitemap data found")
                 return
             
-            print("DEBUG: Got {} sitemap entries in {:.2f}s".format(len(sitemap_data), time.time() - start_time))
             
             # Filter endpoints
             filter_start = time.time()
             filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, self._sitemap_config)
             if not filtered_endpoints:
-                print("DEBUG: No endpoints passed filtering")
                 return
             
-            print("DEBUG: Filtered to {} endpoints in {:.2f}s".format(len(filtered_endpoints), time.time() - filter_start))
             
             # Check for new endpoints efficiently
             new_endpoints = []
@@ -4723,16 +4729,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Add new endpoints if any found
             if new_endpoints:
-                print("DEBUG: Found {} new endpoints - using chunked processing".format(len(new_endpoints)))
                 
                 # Use the same chunked processing as sitemap import to prevent GUI freezing
                 imported_count = self._add_endpoints_to_watchlist_chunked(new_endpoints, is_auto_update=True)
                 
-                print("Auto-imported {} new endpoints from sitemap in {:.2f}s total".format(
-                    imported_count, time.time() - start_time))
                 
             else:
-                print("DEBUG: No new endpoints found (check completed in {:.2f}s)".format(time.time() - start_time))
+                pass  # No new endpoints found
                 
         except Exception as e:
             print("Error checking sitemap updates: {}".format(str(e)))
@@ -4748,8 +4751,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Ensure internal data structure exists
             if not hasattr(self, '_data') or 'watch_list_audit' not in self._data:
                 self._data = {'watch_list_audit': []}
-            
-            print("Processing {} endpoints with chunked auto-update processing".format(len(endpoints)))
             
             # Use smaller chunks for auto-updates to minimize GUI impact
             chunk_size = 20  # Smaller chunks for background auto-updates
@@ -4822,23 +4823,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     if not hasattr(self, '_last_auto_save') or current_time - self._last_auto_save > 60:
                         self._save_watch_list_data()
                         self._last_auto_save = current_time
-                        print("Auto-update: Saved data to disk")
                     
                     # Throttle status updates (only update every 30 seconds)
                     if not hasattr(self, '_last_auto_status') or current_time - self._last_auto_status > 30:
                         self._update_audit_status_display()
                         self._last_auto_status = current_time
-                        print("Auto-update: Updated status display")
                     
                     # Always sync text area but throttle it too
                     if not hasattr(self, '_last_auto_sync') or current_time - self._last_auto_sync > 45:
                         self._sync_table_to_text()
                         self._last_auto_sync = current_time
-                        print("Auto-update: Synced table to text")
                     
                     # Minimal feedback for auto-updates
-                    if imported_count > 0:
-                        print("Auto-update completed: {} new endpoints added".format(imported_count))
+                    # if imported_count > 0:
+                    #     print("Auto-update completed: {} new endpoints added".format(imported_count))
                     
                 except Exception as e:
                     print("Error in auto-update completion: {}".format(str(e)))
@@ -4943,13 +4941,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             main_panel = JPanel(BorderLayout())
             
-            # Add status label at the top for in-dialog feedback
-            status_panel = JPanel()
-            status_panel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10))  # Add padding
+            # Create status label that will be used in all tabs
             dialog_status_label = JLabel(" ")  # Empty initially
             dialog_status_label.setFont(dialog_status_label.getFont().deriveFont(12.0))
-            status_panel.add(dialog_status_label)
-            main_panel.add(status_panel, BorderLayout.NORTH)
             
             # Create tabbed pane for different config sections
             config_tabs = JTabbedPane()
@@ -4987,11 +4981,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             auto_audit_panel.add(auto_audit_scanner_checkbox, gbc)
             
             # Table view section separator
+            gbc.gridx = 0
             gbc.gridy = 4
             gbc.gridwidth = 2
-            table_view_separator = JLabel("Table View Settings")
-            table_view_separator.setFont(table_view_separator.getFont().deriveFont(14.0))
-            auto_audit_panel.add(table_view_separator, gbc)
+            title_label = JLabel("Table View Settings")
+            title_label.setFont(title_label.getFont().deriveFont(16.0))
+            auto_audit_panel.add(title_label, gbc)
             
             # Table view description
             gbc.gridy = 5
@@ -5024,6 +5019,12 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Get current sitemap config or create default
             sitemap_config = settings.get("sitemap_config", {})
+            
+            # Define sitemap action buttons here so they can be referenced later
+            update_sitemap_btn = JButton("Update Sitemap Config")
+            clear_sitemap_btn = JButton("Clear Configuration")
+            fetch_sitemap_btn = JButton("Fetch Data from Sitemap")
+            fetch_sitemap_btn.setToolTipText("Immediately fetch and import new endpoints from sitemap")
             
             # Target selection
             gbc.gridx = 0
@@ -5227,165 +5228,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             sitemap_panel.add(frequency_combo, gbc)
             
             # Instructions
-            gbc.gridy = 8
-            gbc.gridwidth = 2
-            instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'. Fast monitoring uses more CPU but detects changes quicker")
-            sitemap_panel.add(instructions, gbc)
-            
-            # Action buttons for sitemap
-            gbc.gridy = 9
-            gbc.gridwidth = 1
-            gbc.fill = GridBagConstraints.NONE
-            
-            sitemap_button_panel = JPanel()
-            
-            # Update sitemap config button
-            update_sitemap_btn = JButton("Update Sitemap Config")
-            def update_sitemap_config(e):
-                try:
-                    dialog_status_label.setText(" ")  # Clear previous status
-                    
-                    selected_target = str(target_combo.getSelectedItem()) if target_combo.getSelectedItem() else ""
-                    if not selected_target or selected_target == "No targets found":
-                        dialog_status_label.setText("❌ Please select a valid target")
-                        return
-                    
-                    # Parse and validate extensions
-                    extensions_text = extensions_field.getText().strip()
-                    exclude_extensions = []
-                    if extensions_text:
-                        exclude_extensions = [ext.strip().lower() for ext in extensions_text.split(",") if ext.strip()]
-                    
-                    # Parse and validate patterns - preserve exact user input
-                    patterns_text = exclude_area.getText().strip()
-                    exclude_patterns = []
-                    if patterns_text:
-                        # Split by lines and preserve non-empty patterns exactly as entered
-                        exclude_patterns = [pattern.strip() for pattern in patterns_text.split("\n") if pattern.strip()]
-                    
-                    # Parse and validate status codes
-                    status_text = status_field.getText().strip()
-                    exclude_status_codes = []
-                    if status_text:
-                        for code in status_text.split(","):
-                            code = code.strip()
-                            if code.isdigit():
-                                exclude_status_codes.append(int(code))
-                    
-                    # Parse and validate MIME types from checkboxes
-                    exclude_mime_types = []
-                    for mime_type, checkbox in mime_checkboxes.items():
-                        if checkbox.isSelected():
-                            exclude_mime_types.append(mime_type)
-                    
-                    # Get monitoring frequency
-                    freq_index = frequency_combo.getSelectedIndex()
-                    if freq_index == 0:
-                        monitor_frequency = 5  # Fast
-                    elif freq_index == 1:
-                        monitor_frequency = 10  # Normal
-                    else:
-                        monitor_frequency = 30  # Slow
-                    
-                    print("DEBUG: Updating sitemap config with:")
-                    print("  Target: {}".format(selected_target))
-                    print("  Extensions: {}".format(exclude_extensions))
-                    print("  Patterns: {}".format(exclude_patterns))
-                    print("  Status codes: {}".format(exclude_status_codes))
-                    print("  MIME types: {}".format(exclude_mime_types))
-                    print("  Auto-update: {}".format(auto_update_checkbox.isSelected()))
-                    print("  Monitor frequency: {} seconds".format(monitor_frequency))
-                    
-                    new_config = {
-                        "target": selected_target,
-                        "exclude_extensions": exclude_extensions,
-                        "exclude_patterns": exclude_patterns,
-                        "exclude_status_codes": exclude_status_codes,
-                        "exclude_mime_types": exclude_mime_types,
-                        "auto_update": auto_update_checkbox.isSelected(),
-                        "monitor_frequency": monitor_frequency
-                    }
-                    
-                    # Update sitemap config in memory
-                    self._sitemap_config = new_config
-                    
-                    # Load current data and update settings
-                    data = self._load_data_from_file()
-                    if "settings" not in data:
-                        data["settings"] = {}
-                    
-                    # Save the configuration exactly as entered
-                    data["settings"]["sitemap_config"] = new_config
-                    self._save_data_to_file(data)
-                    
-                    # Update cached data to stay in sync
-                    self._data = data
-                    
-                    print("DEBUG: Sitemap config saved to data file")
-                    
-                    # Handle auto-update monitoring
-                    if new_config.get("auto_update", False):
-                        self._start_sitemap_monitoring()
-                        dialog_status_label.setText("Sitemap configuration updated successfully (auto-update enabled)")
-                    else:
-                        self._stop_sitemap_monitoring()
-                        dialog_status_label.setText("Sitemap configuration updated successfully")
-                    
-                    # Verify the save worked by reloading
-                    verify_data = self._load_data_from_file()
-                    saved_config = verify_data.get("settings", {}).get("sitemap_config", {})
-                    print("DEBUG: Verified saved patterns: {}".format(saved_config.get("exclude_patterns", [])))
-                    
-                except Exception as ex:
-                    error_msg = "Error updating sitemap config: {}".format(str(ex))
-                    print("ERROR: {}".format(error_msg))
-                    import traceback
-                    traceback.print_exc()
-                    dialog_status_label.setText("❌ {}".format(error_msg))
-            
-            update_sitemap_btn.addActionListener(update_sitemap_config)
-            sitemap_button_panel.add(update_sitemap_btn)
-            
-            # Clear sitemap config button
-            clear_sitemap_btn = JButton("Clear Configuration")
-            def clear_sitemap_config(e):
-                try:
-                    dialog_status_label.setText(" ")  # Clear previous status
-                    
-                    # Clear sitemap config
-                    self._sitemap_config = None
-                    self._stop_sitemap_monitoring()
-                    
-                    # Update data file
-                    data = self._load_data_from_file()
-                    if "settings" in data and "sitemap_config" in data["settings"]:
-                        del data["settings"]["sitemap_config"]
-                    self._save_data_to_file(data)
-                    
-                    # Update cached data to stay in sync
-                    self._data = data
-                    
-                    # Reset form fields
-                    target_combo.setSelectedIndex(0)
-                    extensions_field.setText("js,gif,jpg,css,svg,png,woff,pdf")
-                    exclude_area.setText("*/admin/login/*\n*/logout\n*/static/*")
-                    status_field.setText("101,404,500")
-                    auto_update_checkbox.setSelected(False)
-                    frequency_combo.setSelectedIndex(0)  # Reset to Fast
-                    
-                    dialog_status_label.setText("✅ Sitemap configuration cleared")
-                    
-                except Exception as ex:
-                    error_msg = "Error clearing sitemap config: {}".format(str(ex))
-                    print("ERROR: {}".format(error_msg))
-                    dialog_status_label.setText("❌ {}".format(error_msg))
-            
-            clear_sitemap_btn.addActionListener(clear_sitemap_config)
-            sitemap_button_panel.add(clear_sitemap_btn)
-            
-            gbc.gridx = 0
-            gbc.gridwidth = 2
-            sitemap_panel.add(sitemap_button_panel, gbc)
+            # gbc.gridy = 8
+            # gbc.gridwidth = 2
+            # instructions = JLabel("Wildcards: */pattern/* matches any path containing 'pattern'. /pattern/* matches paths starting with '/pattern/'. Fast monitoring uses more CPU but detects changes quicker")
+            # sitemap_panel.add(instructions, gbc)
             
             config_tabs.addTab("Sitemap", sitemap_panel)
             
@@ -5443,11 +5289,188 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             config_tabs.addTab("Project", project_panel)
             
+            # Add action listeners for sitemap buttons now that all form elements are created
+            def update_sitemap_config(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    selected_target = str(target_combo.getSelectedItem()) if target_combo.getSelectedItem() else ""
+                    if not selected_target or selected_target == "No targets found":
+                        dialog_status_label.setText("Please select a valid target")
+                        return
+                    
+                    # Parse and validate extensions
+                    extensions_text = extensions_field.getText().strip()
+                    exclude_extensions = []
+                    if extensions_text:
+                        exclude_extensions = [ext.strip().lower() for ext in extensions_text.split(",") if ext.strip()]
+                    
+                    # Parse and validate patterns - preserve exact user input
+                    patterns_text = exclude_area.getText().strip()
+                    exclude_patterns = []
+                    if patterns_text:
+                        # Split by lines and preserve non-empty patterns exactly as entered
+                        exclude_patterns = [pattern.strip() for pattern in patterns_text.split("\n") if pattern.strip()]
+                    
+                    # Parse and validate status codes
+                    status_text = status_field.getText().strip()
+                    exclude_status_codes = []
+                    if status_text:
+                        for code in status_text.split(","):
+                            code = code.strip()
+                            if code.isdigit():
+                                exclude_status_codes.append(int(code))
+                    
+                    # Parse and validate MIME types from checkboxes
+                    exclude_mime_types = []
+                    for mime_type, checkbox in mime_checkboxes.items():
+                        if checkbox.isSelected():
+                            exclude_mime_types.append(mime_type)
+                    
+                    # Get monitoring frequency
+                    freq_index = frequency_combo.getSelectedIndex()
+                    if freq_index == 0:
+                        monitor_frequency = 5  # Fast
+                    elif freq_index == 1:
+                        monitor_frequency = 10  # Normal
+                    else:
+                        monitor_frequency = 30  # Slow
+                    
+                    new_config = {
+                        "target": selected_target,
+                        "exclude_extensions": exclude_extensions,
+                        "exclude_patterns": exclude_patterns,
+                        "exclude_status_codes": exclude_status_codes,
+                        "exclude_mime_types": exclude_mime_types,
+                        "auto_update": auto_update_checkbox.isSelected(),
+                        "monitor_frequency": monitor_frequency
+                    }
+                    
+                    # Update sitemap config in memory
+                    self._sitemap_config = new_config
+                    
+                    # Load current data and update settings
+                    data = self._load_data_from_file()
+                    if "settings" not in data:
+                        data["settings"] = {}
+                    
+                    # Save the configuration exactly as entered
+                    data["settings"]["sitemap_config"] = new_config
+                    self._save_data_to_file(data)
+                    
+                    # Update cached data to stay in sync
+                    self._data = data
+                                        
+                    # Handle auto-update monitoring
+                    if new_config.get("auto_update", False):
+                        self._start_sitemap_monitoring()
+                        dialog_status_label.setText("Sitemap configuration updated successfully (auto-update enabled)")
+                    else:
+                        self._stop_sitemap_monitoring()
+                        dialog_status_label.setText("Sitemap configuration updated successfully")
+                    
+                    # Verify the save worked by reloading
+                    verify_data = self._load_data_from_file()
+                    saved_config = verify_data.get("settings", {}).get("sitemap_config", {})
+                    print("DEBUG: Verified saved patterns: {}".format(saved_config.get("exclude_patterns", [])))
+                    
+                except Exception as ex:
+                    error_msg = "Error updating sitemap config: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    import traceback
+                    traceback.print_exc()
+                    dialog_status_label.setText("{}".format(error_msg))
+            
+            def clear_sitemap_config(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    # Clear sitemap config
+                    self._sitemap_config = None
+                    self._stop_sitemap_monitoring()
+                    
+                    # Update data file
+                    data = self._load_data_from_file()
+                    if "settings" in data and "sitemap_config" in data["settings"]:
+                        del data["settings"]["sitemap_config"]
+                    self._save_data_to_file(data)
+                    
+                    # Update cached data to stay in sync
+                    self._data = data
+                    
+                    # Reset form fields
+                    target_combo.setSelectedIndex(0)
+                    extensions_field.setText("js,gif,jpg,css,svg,png,woff,pdf")
+                    exclude_area.setText("*/admin/login/*\n*/logout\n*/static/*")
+                    status_field.setText("101,404,500")
+                    auto_update_checkbox.setSelected(False)
+                    frequency_combo.setSelectedIndex(0)  # Reset to Fast
+                    
+                    dialog_status_label.setText("Sitemap configuration cleared")
+                    
+                except Exception as ex:
+                    error_msg = "Error clearing sitemap config: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    dialog_status_label.setText("{}".format(error_msg))
+            
+            def fetch_from_sitemap(e):
+                try:
+                    dialog_status_label.setText(" ")  # Clear previous status
+                    
+                    # Check if sitemap config exists
+                    if not self._sitemap_config:
+                        dialog_status_label.setText("No sitemap configuration found. Please update configuration first.")
+                        return
+                    
+                    dialog_status_label.setText("Fetching data from sitemap...")
+                    
+                    # Extract sitemap data using current configuration
+                    sitemap_data = self._extract_sitemap_data(self._sitemap_config)
+                    if not sitemap_data:
+                        dialog_status_label.setText("No sitemap data found for target")
+                        return
+                    
+                    # Filter endpoints using current configuration
+                    filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, self._sitemap_config)
+                    if not filtered_endpoints:
+                        dialog_status_label.setText("No endpoints found after filtering")
+                        return
+                    
+                    # Add new endpoints to watchlist
+                    imported_count = self._add_endpoints_to_watchlist(filtered_endpoints)
+                    
+                    if imported_count > 0:
+                        dialog_status_label.setText("Successfully imported {} new endpoints from sitemap".format(imported_count))
+                    else:
+                        dialog_status_label.setText("No new endpoints found - all sitemap URLs already in watch list")
+                    
+                except Exception as ex:
+                    error_msg = "Error fetching from sitemap: {}".format(str(ex))
+                    print("ERROR: {}".format(error_msg))
+                    import traceback
+                    traceback.print_exc()
+                    dialog_status_label.setText("{}".format(error_msg))
+            
+            # Attach action listeners to sitemap buttons
+            update_sitemap_btn.addActionListener(update_sitemap_config)
+            clear_sitemap_btn.addActionListener(clear_sitemap_config)
+            fetch_sitemap_btn.addActionListener(fetch_from_sitemap)
+            
             main_panel.add(config_tabs, BorderLayout.CENTER)
             
-            # Button panel with padding
+            # Bottom panel with status label and buttons
+            bottom_panel = JPanel(BorderLayout())
+            bottom_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))  # Add padding
+            
+            # Add status label at the bottom for in-dialog feedback
+            status_panel = JPanel()
+            dialog_status_label = JLabel(" ")  # Empty initially
+            dialog_status_label.setFont(dialog_status_label.getFont().deriveFont(12.0))
+            status_panel.add(dialog_status_label)
+            bottom_panel.add(status_panel, BorderLayout.NORTH)
+            
+            # Button panel
             button_panel = JPanel()
-            button_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))  # Add padding
             
             # Apply Watch List Settings button
             apply_btn = JButton("Apply Watch List Settings")
@@ -5486,12 +5509,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 except Exception as ex:
                     error_msg = "Error applying settings: {}".format(str(ex))
                     print("ERROR: {}".format(error_msg))
-                    dialog_status_label.setText("❌ {}".format(error_msg))
+                    dialog_status_label.setText("{}".format(error_msg))
             
             apply_btn.addActionListener(apply_settings)
-            button_panel.add(apply_btn)
             
-            # Import New Sitemap Config button
+            # Import New Sitemap Config button (will be moved to sitemap tab)
             import_btn = JButton("Import New Sitemap Config")
             def import_new_sitemap(e):
                 try:
@@ -5503,14 +5525,62 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     print("Error launching sitemap import: {}".format(str(ex)))
             
             import_btn.addActionListener(import_new_sitemap)
-            button_panel.add(import_btn)
             
-            # Close button
+            # Close button (will be used in all tabs)
             close_btn = JButton("Close")
             close_btn.addActionListener(lambda e: dialog.dispose())
-            button_panel.add(close_btn)
             
-            main_panel.add(button_panel, BorderLayout.SOUTH)
+            # Create tab-specific button panels
+            from javax.swing import JPanel
+            from java.awt import CardLayout
+            
+            # Button container with CardLayout to switch between different button sets
+            button_container = JPanel(CardLayout())
+            
+            # Watch List tab buttons
+            watchlist_button_panel = JPanel()
+            watchlist_button_panel.add(apply_btn)
+            watchlist_button_panel.add(JButton("Close", actionPerformed=lambda e: dialog.dispose()))
+            button_container.add(watchlist_button_panel, "watchlist")
+            
+            # Sitemap tab buttons  
+            sitemap_button_panel = JPanel()
+            sitemap_button_panel.add(update_sitemap_btn)
+            sitemap_button_panel.add(clear_sitemap_btn)
+            sitemap_button_panel.add(fetch_sitemap_btn)
+            sitemap_button_panel.add(import_btn)
+            sitemap_button_panel.add(JButton("Close", actionPerformed=lambda e: dialog.dispose()))
+            button_container.add(sitemap_button_panel, "sitemap")
+            
+            # Project tab buttons
+            project_button_panel = JPanel()
+            project_button_panel.add(JButton("Close", actionPerformed=lambda e: dialog.dispose()))
+            button_container.add(project_button_panel, "project")
+            
+            # Add tab change listener to switch button panels
+            from javax.swing.event import ChangeListener
+            class TabChangeListener(ChangeListener):
+                def stateChanged(self, e):
+                    selected_index = config_tabs.getSelectedIndex()
+                    card_layout = button_container.getLayout()
+                    if selected_index == 0:  # Watch List tab
+                        card_layout.show(button_container, "watchlist")
+                    elif selected_index == 1:  # Sitemap tab
+                        card_layout.show(button_container, "sitemap")
+                    elif selected_index == 2:  # Project tab
+                        card_layout.show(button_container, "project")
+            
+            config_tabs.addChangeListener(TabChangeListener())
+            
+            # Set initial button panel (Watch List tab)
+            card_layout = button_container.getLayout()
+            card_layout.show(button_container, "watchlist")
+            
+            # Add button container to bottom panel
+            bottom_panel.add(button_container, BorderLayout.SOUTH)
+            
+            # Add bottom panel to main panel
+            main_panel.add(bottom_panel, BorderLayout.SOUTH)
             
             dialog.add(main_panel)
             dialog.setVisible(True)
@@ -5524,7 +5594,6 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             # Don't save if we're currently updating the GUI (prevents overwriting during project switches)
             if hasattr(self, '_is_updating_gui') and self._is_updating_gui:
-                print("Skipping save during GUI update to prevent data overwrite")
                 return
             
             # Save the updated data
@@ -5824,7 +5893,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error syncing table to text: {}".format(str(e)))
     
     def _sync_text_to_table(self):
-        """Sync text area data to table"""
+        """Sync text area data to table - optimized to prevent UI freezing"""
         try:
             if not hasattr(self, '_watch_table_model') or not hasattr(self, '_path_textarea'):
                 return
@@ -5836,54 +5905,73 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             new_paths = [line.strip() for line in text_content.split('\n') if line.strip()]
             
-            # Get existing data from internal structure
-            existing_data = {}
-            if hasattr(self, '_data') and 'watch_list_audit' in self._data:
-                for item in self._data['watch_list_audit']:
-                    if isinstance(item, dict):
-                        path = item.get('path', '')
-                        manual_audited = item.get('manual_audited', False)
-                        scanned = item.get('scanned', False)
-                        last_audit = item.get('last_audit', 'Never')
-                        note = item.get('note', '')
-                        highlight = item.get('highlight', False)
-                        existing_data[path] = (manual_audited, scanned, last_audit, note, highlight)
+            # Set updating flag to prevent events during bulk operations
+            self._is_updating_gui = True
             
-            # Clear table and internal data
-            self._watch_table_model.setRowCount(0)
-            if hasattr(self, '_data'):
-                self._data['watch_list_audit'] = []
-            
-            # Re-add paths, preserving audit status and dates
-            for path in new_paths:
-                # Use display format for the table
-                display_path = self._get_display_url(path)
+            try:
+                # Get existing data from internal structure
+                existing_data = {}
+                if hasattr(self, '_data') and 'watch_list_audit' in self._data:
+                    for item in self._data['watch_list_audit']:
+                        if isinstance(item, dict):
+                            path = item.get('path', '')
+                            manual_audited = item.get('manual_audited', False)
+                            scanned = item.get('scanned', False)
+                            last_audit = item.get('last_audit', 'Never')
+                            note = item.get('note', '')
+                            highlight = item.get('highlight', False)
+                            existing_data[path] = (manual_audited, scanned, last_audit, note, highlight)
                 
-                if path in existing_data:
-                    # Preserve existing data
-                    manual_audited, scanned, last_audit, note, highlight = existing_data[path]
-                    row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
-                else:
-                    # New path
-                    manual_audited, scanned, last_audit, note, highlight = False, False, "Never", "", False
-                    row_data = [display_path, manual_audited, scanned, last_audit, note, highlight]
+                # Clear table efficiently
+                self._watch_table_model.setRowCount(0)
                 
-                # Add to table
-                self._watch_table_model.addRow(row_data)
-                
-                # Add to internal data structure (full URL)
+                # Clear internal data
                 if hasattr(self, '_data'):
-                    self._data['watch_list_audit'].append({
-                        'path': path,  # Store full URL in internal data
-                        'manual_audited': manual_audited,
-                        'scanned': scanned,
-                        'last_audit': last_audit,
-                        'note': note,
-                        'highlight': highlight
-                    })
+                    self._data['watch_list_audit'] = []
+                
+                # Re-add paths in batches to prevent UI freezing
+                batch_size = 50
+                for i in range(0, len(new_paths), batch_size):
+                    batch = new_paths[i:i + batch_size]
+                    
+                    for j, path in enumerate(batch):
+                        # Use display format for the table
+                        display_path = self._get_display_url(path)
+                        
+                        if path in existing_data:
+                            # Preserve existing data
+                            manual_audited, scanned, last_audit, note, highlight = existing_data[path]
+                        else:
+                            # New path - DEFAULT VALUES: not audited, not scanned
+                            manual_audited, scanned, last_audit, note, highlight = False, False, "Never", "", False
+                        
+                        # Table columns: [#, Path, Manual Audited, Scanned, Last Audit, Note, Highlight]
+                        row_number = i + j + 1
+                        row_data = [row_number, display_path, manual_audited, scanned, last_audit, note, highlight]
+                        self._watch_table_model.addRow(row_data)
+                        
+                        # Add to internal data structure (full URL)
+                        if hasattr(self, '_data'):
+                            self._data['watch_list_audit'].append({
+                                'path': path,  # Store full URL in internal data
+                                'manual_audited': manual_audited,
+                                'scanned': scanned,
+                                'last_audit': last_audit,
+                                'note': note,
+                                'highlight': highlight
+                            })
+                    
+                    # Yield to GUI thread between batches
+                    if i + batch_size < len(new_paths):
+                        SwingUtilities.invokeLater(lambda: None)
+                        
+            finally:
+                # Always clear the updating flag
+                self._is_updating_gui = False
             
         except Exception as e:
             print("Error syncing text to table: {}".format(str(e)))
+            self._is_updating_gui = False
     
     def _save_watch_list_data(self):
         """Save watch list data including audit status"""
@@ -6209,16 +6297,26 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _auto_mark_as_audited(self, path, full_url, source_tool="Repeater"):
         """Automatically mark matching paths as audited when accessed from specified tool"""
         try:
+            print("DEBUG: _auto_mark_as_audited called - Path: {}, Full URL: {}, Tool: {}".format(path, full_url, source_tool))
+            
             if not hasattr(self, '_watch_table_model'):
+                print("DEBUG: No watch table model available")
                 return
             
             # Find matching paths in the table and mark them as audited
             marked_count = 0
-            for row in range(self._watch_table_model.getRowCount()):
+            table_row_count = self._watch_table_model.getRowCount()
+            print("DEBUG: Checking {} rows in watch table".format(table_row_count))
+            
+            for row in range(table_row_count):
                 table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                print("DEBUG: Comparing table path '{}' with request path '{}' and full URL '{}'".format(table_path, path, full_url))
                 
                 # Check if this table entry matches the current request
-                if self._is_match(table_path, path, full_url):
+                is_match = self._is_match(table_path, path, full_url)
+                print("DEBUG: Match result: {}".format(is_match))
+                
+                if is_match:
                     # Determine which column to update based on source tool
                     marked_this_path = False
                     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -6288,17 +6386,18 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 self._status_label.setText("Ready - {} paths ({} manual, {} scanned, {} pending)".format(
                     total_paths, manual_audited_count, scanned_count, pending_count))
                 
-                # Update progress bar
+                # Update progress bar - SHOULD TRACK MANUAL AUDITS ONLY
                 if hasattr(self, '_progress_bar') and hasattr(self, '_progress_details'):
                     if total_paths > 0:
-                        progress_percentage = int((audited_count * 100) / total_paths)
+                        # Progress bar tracks manual audits only (not scanned)
+                        progress_percentage = int((manual_audited_count * 100) / total_paths)
                         self._progress_bar.setValue(progress_percentage)
                         self._progress_bar.setString("{}%".format(progress_percentage))
-                        self._progress_details.setText("({}/{} audited)".format(audited_count, total_paths))
+                        self._progress_details.setText("({}/{} manually audited)".format(manual_audited_count, total_paths))
                     else:
                         self._progress_bar.setValue(0)
                         self._progress_bar.setString("0%")
-                        self._progress_details.setText("(0/0 audited)")
+                        self._progress_details.setText("(0/0 manually audited)")
                 
         except Exception as e:
             print("Error updating audit status display: {}".format(str(e)))
@@ -6447,6 +6546,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 if self._is_match(watch_path, path, full_url):
                     return True
+                    
         else:
             return False
             
@@ -6478,15 +6578,19 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if not hasattr(self, '_watch_table_model'):
                 return False
             
-            for row in range(self._watch_table_model.getRowCount()):
+            total_rows = self._watch_table_model.getRowCount()
+            
+            for row in range(total_rows):
                 table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
+                manually_audited = self._watch_table_model.getValueAt(row, 2)  # Manual audited column is now 2
                 
                 # Check if this table entry matches the current request
                 if self._is_match(table_path, path, full_url):
-                    # Check if already manually audited (column 2)
-                    manually_audited = self._watch_table_model.getValueAt(row, 2)  # Manual audited column is now 2
                     if manually_audited:
                         return True
+                    else:
+                        return False
+            
             return False
         except Exception as e:
             print("Error checking if already manually audited: {}".format(str(e)))
@@ -6507,23 +6611,65 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             normalized_pattern = normalize_url(pattern)
             normalized_full_url = normalize_url(full_url)
             
-            # Convert wildcard pattern to regex
-            regex_pattern = normalized_pattern.replace('*', '.*')
-            regex_pattern = '^' + regex_pattern + '$'
-            
-            # Check against both path and normalized full URL
-            path_match = re.match(regex_pattern, path, re.IGNORECASE)
-            url_match = re.match(regex_pattern, normalized_full_url, re.IGNORECASE)
-            
-            if path_match or url_match:
+            # Method 1: Exact URL match (highest priority)
+            if normalized_pattern.lower() == normalized_full_url.lower():
                 return True
+            
+            # Method 2: Wildcard/regex pattern matching
+            if '*' in normalized_pattern:
+                regex_pattern = normalized_pattern.replace('*', '.*')
+                regex_pattern = '^' + regex_pattern + '$'
                 
-            # Also check simple substring matching for convenience (using normalized URLs)
-            path_substring = normalized_pattern.lower() in path.lower()
-            url_substring = normalized_pattern.lower() in normalized_full_url.lower()
+                url_match = re.match(regex_pattern, normalized_full_url, re.IGNORECASE)
+                if url_match:
+                    return True
             
-            if path_substring or url_substring:
-                return True
+            # Method 3: Path-only matching (extract path from both pattern and URL)
+            try:
+                from urlparse import urlparse
+                
+                # Extract path from pattern (if it's a full URL)
+                if normalized_pattern.startswith(('http://', 'https://')):
+                    pattern_parsed = urlparse(normalized_pattern)
+                    pattern_path = pattern_parsed.path if pattern_parsed.path else '/'
+                else:
+                    pattern_path = normalized_pattern
+                
+                # Extract path from full URL
+                url_parsed = urlparse(normalized_full_url)
+                url_path = url_parsed.path if url_parsed.path else '/'
+                
+                # Special handling for root path - only match exact root
+                if pattern_path == '/' and url_path == '/':
+                    return True
+                elif pattern_path == '/' and url_path != '/':
+                    # Continue to other matching methods, don't return False yet
+                    pass
+                
+                # Exact path match (for non-root paths)
+                elif pattern_path.lower() == url_path.lower():
+                    return True
+                
+                # Path pattern matching (if pattern has wildcards)
+                if '*' in pattern_path:
+                    path_regex = pattern_path.replace('*', '.*')
+                    path_regex = '^' + path_regex + '$'
+                    if re.match(path_regex, url_path, re.IGNORECASE):
+                        return True
+                
+                # Directory-based matching (only for specific directory patterns, not root)
+                # Pattern must end with / and be more specific than just root "/"
+                if (pattern_path.endswith('/') and 
+                    len(pattern_path) > 1 and  # Not just root "/"
+                    pattern_path != '/' and    # Explicitly exclude root
+                    url_path.lower().startswith(pattern_path.lower())):
+                    return True
+                    
+            except ImportError:
+                # Fallback if urlparse is not available
+                pass
+            
+            return False
                                 
         except Exception as e:
             print("Error matching pattern '{}': {}".format(pattern, str(e)))
@@ -7117,59 +7263,109 @@ class CWEMessageEditorTab(IMessageEditorTab):
     
     def isEnabled(self, content, isRequest):
         """Return True if this tab should be enabled for the given content"""
-        return isRequest  # Only show for requests, not responses
+        enabled = isRequest  # Only show for requests, not responses
+        return enabled
     
     def setMessage(self, content, isRequest):
         """Called when the message changes"""
-        print("CWE Tab setMessage called - content: {}, isRequest: {}".format(content is not None, isRequest))
-        
         if content is None or not isRequest:
-            print("No content or not a request - clearing")
             self._current_message = None
             self._current_request_info = None
             self._update_ui_for_request()
             return
-        
+
         self._current_message = content
         try:
-            # Parse the request manually first to avoid URL issues
-            self._current_request_info = self._parse_request_manually(content)
+            # Try Burp's helpers first for better accuracy
+            self._current_request_info = None
             
-            if self._current_request_info is not None:
-                print("Successfully parsed request - Method: {}, Path: {}".format(
-                    self._current_request_info.getMethod(), 
-                    self._current_request_info.getUrl().getPath()))
-            else:
-                print("Failed to parse request")
+            try:
+                if hasattr(self._extender, '_helpers'):
+                    # Convert array.array to bytes if needed
+                    if hasattr(content, 'tostring'):
+                        # For array.array objects, convert to bytes
+                        request_bytes = content.tostring()
+                        request_info = self._extender._helpers.analyzeRequest(request_bytes)
+                    elif hasattr(content, 'getRequest'):
+                        # For IHttpRequestResponse objects
+                        service = content.getHttpService()
+                        request_bytes = content.getRequest()
+                        request_info = self._extender._helpers.analyzeRequest(service, request_bytes)
+                    else:
+                        # Direct analysis for other types
+                        request_info = self._extender._helpers.analyzeRequest(content)
                     
+                    try:
+                        if request_info and hasattr(request_info, 'getUrl'):
+                            # WORKAROUND: Skip getUrl() call as it seems to cause tab refresh
+                            # Instead, extract URL info manually from the original request bytes
+                            self._current_request_info = request_info
+                            
+                            # Store the original request bytes for manual URL extraction
+                            try:
+                                self._original_request_bytes = request_bytes
+                            except:
+                                self._original_request_bytes = None
+                            
+                            # Try to get method to verify the object works
+                            try:
+                                method = request_info.getMethod()
+                            except Exception as method_ex:
+                                pass  # Continue even if method extraction fails
+                        else:
+                            self._current_request_info = None
+                    except Exception as parse_ex:
+                        # Even if parsing fails, try to use the request_info
+                        if request_info:
+                            self._current_request_info = request_info
+            except Exception as e:
+                pass  # Fall back to manual parsing
+            
+            # Fall back to manual parsing if helpers failed
+            if self._current_request_info is None:
+                self._current_request_info = self._parse_request_manually(content)
+            
             self._update_ui_for_request()
                 
         except Exception as e:
             print("Error analyzing request in CWE tab: {}".format(str(e)))
-            import traceback
-            traceback.print_exc()
             self._current_request_info = None
             self._update_ui_for_request()
     
     def _parse_request_manually(self, content):
         """Manually parse request if helpers fail"""
         try:
-            # Convert content to string if it's bytes
+            # Handle different types of content objects
             request_str = ""
-            if hasattr(content, 'tostring'):
-                request_str = content.tostring()
-            elif isinstance(content, (bytes, bytearray)):
-                request_str = str(content)
-            elif hasattr(content, '__iter__'):
-                # Handle byte arrays
-                try:
-                    request_str = ''.join(chr(b) for b in content)
-                except:
-                    request_str = str(content)
-            else:
-                request_str = str(content)
             
-            print("Request string preview: {}".format(request_str[:200]))
+            # If content is IHttpRequestResponse, get the request bytes
+            if hasattr(content, 'getRequest'):
+                request_bytes = content.getRequest()
+                if request_bytes:
+                    if hasattr(request_bytes, 'tostring'):
+                        request_str = request_bytes.tostring()
+                    else:
+                        request_str = ''.join(chr(b & 0xFF) for b in request_bytes)
+                else:
+                    return None
+            else:
+                # Handle raw content - particularly array.array objects
+                if hasattr(content, 'tostring'):
+                    # For array.array objects
+                    request_str = content.tostring()
+                elif isinstance(content, (bytes, bytearray)):
+                    request_str = str(content)
+                elif hasattr(content, '__iter__'):
+                    # Handle byte arrays
+                    try:
+                        request_str = ''.join(chr(b & 0xFF) for b in content)
+                    except:
+                        request_str = str(content)
+                else:
+                    request_str = str(content)
+            
+            if not request_str:
+                return None
             
             lines = request_str.split('\n')
             if len(lines) > 0:
@@ -7186,12 +7382,41 @@ class CWEMessageEditorTab(IMessageEditorTab):
                             host = line.split(':', 1)[1].strip()
                             break
                     
+                    # Detect protocol from the original request context
+                    # Check if the request was made over HTTPS by examining various indicators
+                    protocol = "http"  # Default to HTTP
+                    
+                    # Method 1: Check if helpers can parse it and get the URL
+                    try:
+                        if hasattr(self._extender, '_helpers'):
+                            temp_request_info = self._extender._helpers.analyzeRequest(self._current_message)
+                            if temp_request_info and hasattr(temp_request_info, 'getUrl'):
+                                temp_url = temp_request_info.getUrl()
+                                if temp_url and hasattr(temp_url, 'getProtocol'):
+                                    detected_protocol = temp_url.getProtocol()
+                                    if detected_protocol in ["http", "https"]:
+                                        protocol = detected_protocol
+                    except:
+                        pass  # Fall back to HTTP if helper analysis fails
+                    
+                    # Method 2: Check for HTTPS indicators in headers if helper method failed
+                    if protocol == "http":  # Only check if we haven't detected HTTPS yet
+                        for line in lines[1:]:
+                            line_lower = line.lower()
+                            # Look for HTTPS-specific headers or indicators
+                            if ('x-forwarded-proto: https' in line_lower or 
+                                'x-forwarded-ssl: on' in line_lower or
+                                'x-scheme: https' in line_lower):
+                                protocol = "https"
+                                break
+                    
                     # Create a robust request info object
                     class ManualRequestInfo:
-                        def __init__(self, method, path, host):
+                        def __init__(self, method, path, host, protocol):
                             self.method = method
                             self.path = path
                             self.host = host
+                            self.protocol = protocol
                             
                         def getMethod(self):
                             return self.method
@@ -7199,9 +7424,10 @@ class CWEMessageEditorTab(IMessageEditorTab):
                         def getUrl(self):
                             # Create a URL object that works with our needs
                             class ManualURL:
-                                def __init__(self, path, host):
+                                def __init__(self, path, host, protocol):
                                     self.path = path
                                     self.host = host
+                                    self.protocol = protocol
                                     
                                 def getPath(self):
                                     return self.path
@@ -7209,28 +7435,136 @@ class CWEMessageEditorTab(IMessageEditorTab):
                                 def getHost(self):
                                     return self.host
                                     
+                                def getProtocol(self):
+                                    return self.protocol
+                                    
                                 def toString(self):
-                                    return "https://{}{}".format(self.host, self.path)
+                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
                                     
                                 def __str__(self):
-                                    return "https://{}{}".format(self.host, self.path)
+                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
                                     
-                            return ManualURL(self.path, self.host)
+                            return ManualURL(self.path, self.host, self.protocol)
                     
-                    print("Parsed: {} {} (Host: {})".format(method, path, host))
-                    return ManualRequestInfo(method, path, host)
+                    return ManualRequestInfo(method, path, host, protocol)
             
-            print("Could not parse request line")
             return None
         except Exception as e:
             print("Manual parsing failed: {}".format(str(e)))
-            import traceback
-            traceback.print_exc()
             return None
 
     def getMessage(self):
         """Return the current message"""
         return self._current_message
+    
+    def _extract_url_manually(self):
+        """Extract URL information manually from stored request bytes"""
+        try:
+            if not hasattr(self, '_original_request_bytes') or not self._original_request_bytes:
+                print("DEBUG: No original request bytes available")
+                return None
+                
+            # Convert bytes to string
+            request_str = self._original_request_bytes
+            if hasattr(request_str, 'decode'):
+                request_str = request_str.decode('utf-8', errors='ignore')
+            elif not isinstance(request_str, str):
+                request_str = str(request_str)
+                
+            print("DEBUG: Manual URL extraction from request: {}".format(request_str[:200]))
+            
+            lines = request_str.split('\n')
+            if not lines:
+                return None
+                
+            # Parse first line: METHOD path HTTP/1.1
+            first_line = lines[0].strip()
+            parts = first_line.split(' ')
+            if len(parts) < 2:
+                return None
+                
+            path = parts[1]
+            
+            # Extract host from headers
+            host = "unknown.host"
+            protocol = "http"  # Default
+            
+            for line in lines[1:]:
+                if line.lower().startswith('host:'):
+                    host = line.split(':', 1)[1].strip()
+                    break
+            
+            print("DEBUG: Extracted host: {}".format(host))
+            
+            # Enhanced HTTPS detection
+            # Method 1: Look for HTTPS indicators in headers
+            request_lower = request_str.lower()
+            https_indicators = [
+                'https://',  # Direct HTTPS URLs in content
+                'x-forwarded-proto: https',
+                'x-forwarded-ssl: on',
+                'x-scheme: https',
+                'x-forwarded-protocol: https',
+                'x-url-scheme: https',
+                'front-end-https: on'
+            ]
+            
+            for indicator in https_indicators:
+                if indicator in request_lower:
+                    protocol = "https"
+                    print("DEBUG: Detected HTTPS from indicator: {}".format(indicator))
+                    break
+            
+            # Method 2: Check standard HTTPS ports (if host includes port)
+            if ':443' in host:
+                protocol = "https"
+                print("DEBUG: Detected HTTPS from port 443")
+                # Remove port from host for display
+                host = host.replace(':443', '')
+            
+            # Method 3: Common HTTPS patterns in cookies or content
+            if protocol == "http":  # Only check if not already detected as HTTPS
+                https_patterns = [
+                    'secure;',  # Secure cookie flag
+                    'samesite=none',  # Often used with HTTPS
+                    'redirect_uri=https://',  # OAuth/SSO redirects
+                    'referer: https://',
+                    'origin: https://'
+                ]
+                
+                for pattern in https_patterns:
+                    if pattern in request_lower:
+                        protocol = "https"
+                        print("DEBUG: Detected HTTPS from pattern: {}".format(pattern))
+                        break
+            
+            # Method 4: Check if we can get protocol from the original Burp request_info
+            # This is a last resort that might work without causing tab refresh
+            if protocol == "http" and hasattr(self, '_current_request_info'):
+                try:
+                    # Try to get headers to see if we can find more clues
+                    if hasattr(self._current_request_info, 'getHeaders'):
+                        headers = self._current_request_info.getHeaders()
+                        for header in headers:
+                            header_str = str(header).lower()
+                            if 'https' in header_str:
+                                protocol = "https"
+                                print("DEBUG: Detected HTTPS from request headers")
+                                break
+                except:
+                    pass  # Ignore if headers method doesn't work
+            
+            print("DEBUG: Final detected protocol: {}".format(protocol))
+            
+            return {
+                'protocol': protocol,
+                'host': host,
+                'path': path
+            }
+            
+        except Exception as e:
+            print("DEBUG: Manual URL extraction failed: {}".format(str(e)))
+            return None
     
     def isModified(self):
         """Return whether the message has been modified"""
@@ -7242,7 +7576,11 @@ class CWEMessageEditorTab(IMessageEditorTab):
     
     def _update_ui_for_request(self):
         """Update the UI based on the current request"""
+        print("DEBUG: _update_ui_for_request called - request_info: {}".format(
+            "None" if self._current_request_info is None else "Available"))
+        
         if self._current_request_info is None:
+            print("DEBUG: No request info available - showing 'No request selected'")
             self._request_info_label.setText("No request selected")
             self._clear_vulnerabilities_table()
             self._stats_label.setText("No vulnerabilities for this request")
@@ -7250,19 +7588,122 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
-            url = self._current_request_info.getUrl()
-            method = self._current_request_info.getMethod()
+            print("DEBUG: Trying to get URL and method from request_info...")
             
-            # Get clean path for display
-            clean_path = self._extender._get_path_without_params(url)
-            full_url_str = str(url)
+            # Safely get method first (this seems to work)
+            method = "UNKNOWN"
+            try:
+                method = self._current_request_info.getMethod()
+                print("DEBUG: Successfully got method: {}".format(method))
+            except Exception as method_ex:
+                print("DEBUG: Failed to get method: {}".format(str(method_ex)))
             
-            # Show clean path but indicate if there are parameters
-            if '?' in full_url_str:
-                display_text = "{} {} (with parameters)".format(method, "https://{}{}".format(url.getHost() if hasattr(url, 'getHost') else url.host, clean_path))
-            else:
-                display_text = "{} {}".format(method, full_url_str)
+            # Try to extract URL manually from stored request bytes
+            url_info = self._extract_url_manually()
+            if url_info:
+                print("DEBUG: Successfully extracted URL manually: {}".format(url_info))
+                # Create a mock URL object with the extracted info
+                class MockURL:
+                    def __init__(self, url_info):
+                        self.url_info = url_info
+                    
+                    def getProtocol(self):
+                        return self.url_info.get('protocol', 'http')
+                    
+                    def getHost(self):
+                        return self.url_info.get('host', 'unknown.host')
+                    
+                    def getPath(self):
+                        return self.url_info.get('path', '/')
+                    
+                    def getPort(self):
+                        # Return default ports or -1 if not specified
+                        protocol = self.url_info.get('protocol', 'http')
+                        if protocol == 'https':
+                            return 443
+                        else:
+                            return 80
+                    
+                    def toString(self):
+                        return "{}://{}{}".format(
+                            self.url_info.get('protocol', 'http'),
+                            self.url_info.get('host', 'unknown.host'),
+                            self.url_info.get('path', '/')
+                        )
+                    
+                    def __str__(self):
+                        return self.toString()
                 
+                url = MockURL(url_info)
+                print("DEBUG: Created mock URL object: {}".format(str(url)))
+                
+                # Create a wrapper request_info that intercepts getUrl() calls
+                class RequestInfoWrapper:
+                    def __init__(self, original_request_info, mock_url):
+                        self.original_request_info = original_request_info
+                        self.mock_url = mock_url
+                    
+                    def getUrl(self):
+                        return self.mock_url
+                    
+                    def getMethod(self):
+                        return self.original_request_info.getMethod()
+                    
+                    def __getattr__(self, name):
+                        # Forward any other method calls to the original object
+                        return getattr(self.original_request_info, name)
+                
+                # Replace the current_request_info with our wrapper
+                self._current_request_info = RequestInfoWrapper(self._current_request_info, url)
+                print("DEBUG: Created request info wrapper with mock URL")
+            else:
+                print("DEBUG: Could not extract URL manually")
+                url = None
+            
+            print("DEBUG: Updating UI for request - URL: {}, Method: {}".format(str(url), method))
+            
+            # Handle case where URL might be None
+            if url is not None:
+                # Get clean path for display
+                try:
+                    clean_path = self._extender._get_path_without_params(url)
+                    full_url_str = str(url)
+                except Exception as path_ex:
+                    print("DEBUG: Error getting path: {}".format(str(path_ex)))
+                    clean_path = "/"
+                    full_url_str = "Error getting URL"
+                
+                # Get protocol for correct URL construction
+                protocol = "https"  # Default
+                if hasattr(url, 'getProtocol'):
+                    protocol = url.getProtocol()
+                elif hasattr(url, 'protocol'):
+                    protocol = url.protocol
+                
+                # Get host
+                host = "unknown.host"
+                if hasattr(url, 'getHost'):
+                    host = url.getHost()
+                elif hasattr(url, 'host'):
+                    host = url.host
+                
+                print("DEBUG: Extracted - Protocol: {}, Host: {}, Clean path: {}".format(protocol, host, clean_path))
+                
+                # Show clean path but indicate if there are parameters
+                if '?' in full_url_str:
+                    display_text = "{} {} (with parameters)".format(method, "{}://{}{}".format(protocol, host, clean_path))
+                else:
+                    display_text = "{} {}".format(method, full_url_str)
+            else:
+                # No URL available - show just the method
+                display_text = "{} (URL unavailable)".format(method)
+                full_url_str = "URL unavailable"
+                clean_path = "/"
+                protocol = "http"
+                host = "unknown.host"
+                print("DEBUG: No URL available, using defaults")
+                
+            print("DEBUG: Display text: {}".format(display_text))
             self._request_info_label.setText(display_text)
             
             # Update vulnerabilities table for this request
@@ -7346,8 +7787,13 @@ class CWEMessageEditorTab(IMessageEditorTab):
             cwe_code = selected_item.split(" - ")[0]
             description = selected_item.split(" - ")[1]
             
+            print("DEBUG: About to call getUrl() in _mark_vulnerability...")
             url = self._current_request_info.getUrl()
+            print("DEBUG: Successfully got URL: {}".format(str(url)))
+            
+            print("DEBUG: About to call getMethod() in _mark_vulnerability...")
             method = self._current_request_info.getMethod()
+            print("DEBUG: Successfully got method: {}".format(method))
             # Create hash ignoring query parameters for consistent grouping
             request_hash = self._extender._create_request_hash(url, method)
             
@@ -7530,7 +7976,10 @@ class CWEMessageEditorTab(IMessageEditorTab):
     
     def _save_note(self, event):
         """Save the note for the current request to the watch list (only if request is already in watch list)"""
+        print("DEBUG: _save_note called")
+        
         if self._current_request_info is None:
+            print("DEBUG: No current request info for save note")
             JOptionPane.showMessageDialog(
                 self._component,
                 "No request selected",
@@ -7540,10 +7989,20 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
+            print("DEBUG: About to call getUrl() in _save_note...")
             url = self._current_request_info.getUrl()
+            print("DEBUG: Successfully got URL: {}".format(str(url)))
+            
+            print("DEBUG: About to call toString()...")
             full_url = url.toString()
+            print("DEBUG: Successfully got full_url: {}".format(full_url))
+            
+            print("DEBUG: About to call getPath()...")
             path = url.getPath()
+            print("DEBUG: Successfully got path: {}".format(path))
+            
             note_text = self._note_textarea.getText().strip()
+            print("DEBUG: Note text: '{}'".format(note_text))
             
             # Check if the path exists in the watch list first
             if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
@@ -7554,7 +8013,6 @@ class CWEMessageEditorTab(IMessageEditorTab):
                         item['note'] = note_text
                         item['path'] = full_url  # Update to full URL format
                         found_in_watch_list = True
-                        print("Updated note for path: {} -> '{}'".format(full_url, note_text))
                         break
                 
                 if not found_in_watch_list:
