@@ -1044,24 +1044,67 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             }
     
     def _save_data_to_file(self, data):
-        """Save data to JSON file with timeout protection"""
+        """Save data to JSON file with timeout protection and enhanced error handling"""
+        import time
+        
         try:
             # Use a temporary file for atomic writes
             temp_path = self._data_file_path + ".tmp"
             
+            # Write to temporary file first
             with open(temp_path, 'w') as f:
                 json.dump(data, f, indent=2)
+                f.flush()  # Ensure data is written to disk
+                os.fsync(f.fileno())  # Force write to disk
             
-            # Atomic move (on Windows this might need special handling)
+            # Verify the temporary file was written correctly
             try:
-                if os.path.exists(self._data_file_path):
-                    os.remove(self._data_file_path)
-                os.rename(temp_path, self._data_file_path)
-            except Exception as move_error:
-                print("Error moving temp file: {}".format(str(move_error)))
-                # Fallback: copy content
-                import shutil
-                shutil.move(temp_path, self._data_file_path)
+                with open(temp_path, 'r') as f:
+                    test_data = json.load(f)
+                if not isinstance(test_data, dict):
+                    raise Exception("Temporary file verification failed - invalid JSON structure")
+            except Exception as verify_error:
+                print("Error verifying temporary file: {}".format(str(verify_error)))
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return False
+            
+            # Atomic move (Windows-safe implementation with retries)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(self._data_file_path):
+                        os.remove(self._data_file_path)
+                    os.rename(temp_path, self._data_file_path)
+                    break  # Success
+                    
+                except Exception as move_error:
+                    print("Error moving temp file (attempt {}): {}".format(attempt + 1, str(move_error)))
+                    if attempt == max_retries - 1:
+                        # Final attempt - try copy instead
+                        try:
+                            import shutil
+                            if os.path.exists(self._data_file_path):
+                                os.remove(self._data_file_path)
+                            shutil.copy2(temp_path, self._data_file_path)
+                            os.remove(temp_path)
+                        except Exception as copy_error:
+                            print("Error copying temp file: {}".format(str(copy_error)))
+                            return False
+                    else:
+                        time.sleep(0.1)  # Brief delay before retry
+            
+            # Verify the final file was saved correctly
+            try:
+                with open(self._data_file_path, 'r') as f:
+                    final_data = json.load(f)
+                if not isinstance(final_data, dict):
+                    raise Exception("Final file verification failed - invalid JSON structure")
+            except Exception as final_verify_error:
+                print("Error verifying final saved file: {}".format(str(final_verify_error)))
+                return False
+            
+            return True  # Success
                 
         except Exception as e:
             print("Error saving data to file: {}".format(str(e)))
@@ -1072,6 +1115,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     os.remove(temp_path)
                 except:
                     pass
+            return False  # Failure
     
     def _load_data_from_file(self):
         """Load current data from JSON file with error recovery"""
@@ -1353,10 +1397,16 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Update counter to reflect actual count
             data["vuln_counter"] = len(data["vulnerabilities"])
             
-            self._save_data_to_file(data)
+            save_success = self._save_data_to_file(data)
+            if not save_success:
+                print("Failed to save vulnerability data to file")
+                return False
+            
+            return True  # Success
             
         except Exception as e:
             print("Error saving vulnerability to file: {}".format(str(e)))
+            return False  # Failure
     
     def _remove_vulnerability_from_database(self, vuln_id):
         """Remove a vulnerability from JSON file and update counters"""
@@ -1378,10 +1428,16 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Update vuln_counter to show actual count
                 data["vuln_counter"] = actual_count
             
-            self._save_data_to_file(data)
+            save_success = self._save_data_to_file(data)
+            if not save_success:
+                print("Failed to save vulnerability removal to file")
+                return False
+            
+            return True
             
         except Exception as e:
             print("Error removing vulnerability from file: {}".format(str(e)))
+            return False
     
     def _save_watch_list_to_database(self):
         """Save current watch list audit data to JSON file"""
@@ -2000,6 +2056,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 return java.lang.String
         
         self._watch_table_model = AuditTableModel(column_names, 0)
+        # Store original data for filtering
+        self._original_watch_data = []
         
         self._watch_table = JTable(self._watch_table_model)
         self._watch_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
@@ -2026,9 +2084,46 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         # Add table change listener to save audit status
         self._watch_table_model.addTableModelListener(lambda e: self._on_audit_status_changed(e))
         
+        # Create search panel
+        search_panel = JPanel(BorderLayout())
+        search_label = JLabel("Search (Path/URL or Note): ")
+        search_panel.add(search_label, BorderLayout.WEST)
+        
+        from javax.swing import JTextField
+        from javax.swing.event import DocumentListener
+        
+        self._watch_search_field = JTextField(20)
+        search_panel.add(self._watch_search_field, BorderLayout.CENTER)
+        
+        # Add search functionality
+        class SearchDocumentListener(DocumentListener):
+            def __init__(self, extension_parent):
+                self.extension_parent = extension_parent
+            
+            def insertUpdate(self, e):
+                self.extension_parent._filter_watch_table()
+            
+            def removeUpdate(self, e):
+                self.extension_parent._filter_watch_table()
+            
+            def changedUpdate(self, e):
+                self.extension_parent._filter_watch_table()
+        
+        self._watch_search_field.getDocument().addDocumentListener(SearchDocumentListener(self))
+        
+        # Clear search button
+        clear_search_btn = JButton("Clear", actionPerformed=self._clear_watch_search)
+        search_panel.add(clear_search_btn, BorderLayout.EAST)
+        
+        # Create center panel with search and table
+        center_panel = JPanel(BorderLayout())
+        center_panel.add(search_panel, BorderLayout.NORTH)
+        
         # Scroll pane for table
         table_scroll = JScrollPane(self._watch_table)
-        table_panel.add(table_scroll, BorderLayout.CENTER)
+        center_panel.add(table_scroll, BorderLayout.CENTER)
+        
+        table_panel.add(center_panel, BorderLayout.CENTER)
         
         # Button panel for table operations
         table_button_panel = JPanel()
@@ -2111,7 +2206,17 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         note_item = JMenuItem("Edit Note...")
                         note_item.addActionListener(lambda e: self.extension_parent._edit_note_for_row(selected_rows[0]))
                         popup.add(note_item)
-                        popup.addSeparator()
+                    
+                    # Copy URL option
+                    if len(selected_rows) == 1:
+                        copy_text = "Copy URL"
+                    else:
+                        copy_text = "Copy {} URLs".format(len(selected_rows))
+                    
+                    copy_item = JMenuItem(copy_text)
+                    copy_item.addActionListener(lambda e: self.extension_parent._copy_selected_watch_urls())
+                    popup.add(copy_item)
+                    popup.addSeparator()
                     
                     # Delete option
                     if len(selected_rows) == 1:
@@ -2241,6 +2346,56 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 column.setCellRenderer(checkbox_renderer)
             else:  # Text columns (#, Path/URL, Last Audit, Note)
                 column.setCellRenderer(text_renderer)
+    
+    def _copy_selected_watch_urls(self):
+        """Copy URLs of selected watch list entries to clipboard"""
+        try:
+            selected_rows = self._watch_table.getSelectedRows()
+            if not selected_rows:
+                self._show_status_feedback("No requests selected")
+                return
+            
+            # Collect URLs from selected rows
+            urls = []
+            for row in selected_rows:
+                url = self._watch_table_model.getValueAt(row, 1)  # Path/URL is column 1
+                if url and url.strip():
+                    urls.append(str(url).strip())
+            
+            if not urls:
+                self._show_status_feedback("No valid URLs found in selected rows")
+                return
+            
+            # Remove duplicates while preserving order
+            unique_urls = []
+            seen = set()
+            for url in urls:
+                if url not in seen:
+                    unique_urls.append(url)
+                    seen.add(url)
+            
+            # Join URLs with newlines
+            url_text = '\n'.join(unique_urls)
+            
+            # Copy to clipboard
+            from java.awt.datatransfer import StringSelection
+            from java.awt import Toolkit
+            
+            selection = StringSelection(url_text)
+            clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
+            clipboard.setContents(selection, None)
+            
+            # Show feedback
+            if len(unique_urls) == 1:
+                self._show_status_feedback("Copied 1 URL to clipboard")
+            else:
+                self._show_status_feedback("Copied {} unique URLs to clipboard".format(len(unique_urls)))
+            
+            print("Copied watch list URLs to clipboard:\n{}".format(url_text))
+            
+        except Exception as e:
+            print("Error copying watch list URLs: {}".format(str(e)))
+            self._show_status_feedback("Error copying URLs: {}".format(str(e)))
     
     def _delete_selected_requests(self):
         """Delete selected requests from the watch table"""
@@ -2734,6 +2889,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 return java.lang.String
         
         self._vuln_table_model = VulnTableModel(column_names, 0)
+        # Store original vulnerability data for filtering
+        self._original_vuln_data = []
+        
         self._vuln_table = JTable(self._vuln_table_model)
         self._vuln_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
         # self._vuln_table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF)
@@ -2758,8 +2916,45 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         column_model.getColumn(5).setPreferredWidth(120)  # Timestamp
         column_model.getColumn(6).setPreferredWidth(70)   # Remove button
         
+        # Create search panel for vulnerabilities
+        vuln_search_panel = JPanel(BorderLayout())
+        vuln_search_label = JLabel("Search (URL or Note): ")
+        vuln_search_panel.add(vuln_search_label, BorderLayout.WEST)
+        
+        from javax.swing import JTextField
+        from javax.swing.event import DocumentListener
+        
+        self._vuln_search_field = JTextField(20)
+        vuln_search_panel.add(self._vuln_search_field, BorderLayout.CENTER)
+        
+        # Add search functionality for vulnerabilities
+        class VulnSearchDocumentListener(DocumentListener):
+            def __init__(self, extension_parent):
+                self.extension_parent = extension_parent
+            
+            def insertUpdate(self, e):
+                self.extension_parent._filter_vuln_table()
+            
+            def removeUpdate(self, e):
+                self.extension_parent._filter_vuln_table()
+            
+            def changedUpdate(self, e):
+                self.extension_parent._filter_vuln_table()
+        
+        self._vuln_search_field.getDocument().addDocumentListener(VulnSearchDocumentListener(self))
+        
+        # Clear search button for vulnerabilities
+        clear_vuln_search_btn = JButton("Clear", actionPerformed=self._clear_vuln_search)
+        vuln_search_panel.add(clear_vuln_search_btn, BorderLayout.EAST)
+        
+        # Create center panel with search and table
+        vuln_center_panel = JPanel(BorderLayout())
+        vuln_center_panel.add(vuln_search_panel, BorderLayout.NORTH)
+        
         vuln_scroll = JScrollPane(self._vuln_table)
-        vuln_panel.add(vuln_scroll, BorderLayout.CENTER)
+        vuln_center_panel.add(vuln_scroll, BorderLayout.CENTER)
+        
+        vuln_panel.add(vuln_center_panel, BorderLayout.CENTER)
         
         # Bottom panel for stats
         stats_panel = JPanel()
@@ -2832,6 +3027,21 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     popup = JPopupMenu()
                     
                     selected_rows = table.getSelectedRows()
+                    
+                    # Copy URL option
+                    if len(selected_rows) == 1:
+                        copy_text = "Copy URL"
+                    else:
+                        copy_text = "Copy {} URLs".format(len(selected_rows))
+                    
+                    copy_item = JMenuItem(copy_text)
+                    copy_item.addActionListener(lambda e: self.extension_parent._copy_selected_urls())
+                    popup.add(copy_item)
+                    
+                    # Separator
+                    popup.addSeparator()
+                    
+                    # Delete option
                     if len(selected_rows) == 1:
                         delete_text = "Delete Vulnerability"
                     else:
@@ -2978,6 +3188,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Remove from internal vulnerability list and database
                 deleted_count = 0
+                failed_deletes = 0
                 with self._vuln_lock:
                     for vuln_id in vuln_ids_to_delete:
                         if vuln_id in self._vulnerabilities:
@@ -2985,23 +3196,84 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             print("DEBUG: Removed vulnerability {} from memory".format(vuln_id))
                         
                         # Remove from database file
-                        self._remove_vulnerability_from_database(vuln_id)
-                        deleted_count += 1
-                        print("DEBUG: Removed vulnerability {} from database".format(vuln_id))
+                        if self._remove_vulnerability_from_database(vuln_id):
+                            deleted_count += 1
+                            print("DEBUG: Removed vulnerability {} from database".format(vuln_id))
+                        else:
+                            failed_deletes += 1
+                            print("ERROR: Failed to delete vulnerability {} from database".format(vuln_id))
                 
                 print("DEBUG: Successfully deleted {} vulnerabilities from database".format(deleted_count))
+                if failed_deletes > 0:
+                    print("WARNING: Failed to delete {} vulnerabilities from database".format(failed_deletes))
                 
                 # Update vulnerability stats
                 self._update_vulnerability_stats()
                 
                 if deleted_count > 0:
-                    self._show_status_feedback("Deleted {} vulnerability(ies) - changes saved to file".format(deleted_count))
+                    status_msg = "Deleted {} vulnerability(ies) - changes saved to file".format(deleted_count)
+                    if failed_deletes > 0:
+                        status_msg += " (Warning: {} failed to save)".format(failed_deletes)
+                    self._show_status_feedback(status_msg)
                 else:
-                    self._show_status_feedback("Warning: No vulnerabilities were deleted from database")
+                    if failed_deletes > 0:
+                        self._show_status_feedback("Error: {} vulnerability deletion(s) failed to save to file".format(failed_deletes))
+                    else:
+                        self._show_status_feedback("Warning: No vulnerabilities were deleted from database")
                 
         except Exception as e:
             print("Error deleting selected vulnerabilities: {}".format(str(e)))
             self._show_status_feedback("Error deleting vulnerabilities: {}".format(str(e)))
+    
+    def _copy_selected_urls(self):
+        """Copy URLs of selected vulnerabilities to clipboard"""
+        try:
+            selected_rows = self._vuln_table.getSelectedRows()
+            if not selected_rows:
+                self._show_status_feedback("No vulnerabilities selected")
+                return
+            
+            # Collect URLs from selected rows
+            urls = []
+            for row in selected_rows:
+                url = self._vuln_table_model.getValueAt(row, 3)  # URL is column 3
+                if url and url.strip():
+                    urls.append(str(url).strip())
+            
+            if not urls:
+                self._show_status_feedback("No valid URLs found in selected rows")
+                return
+            
+            # Remove duplicates while preserving order
+            unique_urls = []
+            seen = set()
+            for url in urls:
+                if url not in seen:
+                    unique_urls.append(url)
+                    seen.add(url)
+            
+            # Join URLs with newlines
+            url_text = '\n'.join(unique_urls)
+            
+            # Copy to clipboard
+            from java.awt.datatransfer import StringSelection
+            from java.awt import Toolkit
+            
+            selection = StringSelection(url_text)
+            clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
+            clipboard.setContents(selection, None)
+            
+            # Show feedback
+            if len(unique_urls) == 1:
+                self._show_status_feedback("Copied 1 URL to clipboard")
+            else:
+                self._show_status_feedback("Copied {} unique URLs to clipboard".format(len(unique_urls)))
+            
+            print("Copied URLs to clipboard:\n{}".format(url_text))
+            
+        except Exception as e:
+            print("Error copying URLs: {}".format(str(e)))
+            self._show_status_feedback("Error copying URLs: {}".format(str(e)))
     
     def _remove_vulnerability_at_row(self, row):
         """Remove vulnerability at specific row with confirmation"""
@@ -3048,7 +3320,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         if vuln_id_to_remove in self._vulnerabilities:
                             del self._vulnerabilities[vuln_id_to_remove]
                     
-                    self._remove_vulnerability_from_database(vuln_id_to_remove)
+                    if self._remove_vulnerability_from_database(vuln_id_to_remove):
+                        self._show_status_feedback("Vulnerability deleted and saved to file")
+                    else:
+                        self._show_status_feedback("Error: Vulnerability deleted from UI but failed to save to file")
                     
                     # Update stats
                     self._update_vulnerability_stats()
@@ -3227,6 +3502,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Clear the flag to re-enable saving
             self._is_updating_gui = False
             print("GUI update completed - saving re-enabled")
+            
+            # Store original watch table data for search filtering
+            self._store_original_watch_data()
                 
         except Exception as e:
             print("Error updating GUI with loaded data: {}".format(str(e)))
@@ -5725,6 +6003,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 # Save data
                 self._save_watch_list_data()
                 
+                # Update original data for search filtering
+                self._store_original_watch_data()
+                
                 # Update status
                 total_paths = self._watch_table_model.getRowCount()
                 self._status_label.setText("Ready - {} paths in watch list".format(total_paths))
@@ -5771,6 +6052,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Save data
                 self._save_watch_list_data()
+                
+                # Update original data for search filtering
+                self._store_original_watch_data()
                 
                 # Update status
                 total_paths = self._watch_table_model.getRowCount()
@@ -5826,6 +6110,9 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Save the updated data
                 self._save_watch_list_data()
+                
+                # Update original data for search filtering
+                self._store_original_watch_data()
                 
                 self._show_status_feedback("Note updated for {}".format(path))
                 
@@ -5923,6 +6210,178 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         except Exception as e:
             self._show_status_feedback("Error clearing paths: {}".format(str(e)))
             print("Clear error: {}".format(str(e)))
+    
+    def _filter_watch_table(self):
+        """Filter watch list table based on search text"""
+        try:
+            if not hasattr(self, '_watch_search_field') or not hasattr(self, '_watch_table_model'):
+                return
+            
+            search_text = self._watch_search_field.getText().lower().strip()
+            
+            # If search is empty, restore original data
+            if not search_text:
+                self._restore_original_watch_data()
+                return
+            
+            # Store original data if not already stored
+            if not hasattr(self, '_original_watch_data') or not self._original_watch_data:
+                self._store_original_watch_data()
+            
+            # Clear current table
+            self._watch_table_model.setRowCount(0)
+            
+            # Filter and add matching rows
+            row_number = 1
+            for row_data in self._original_watch_data:
+                # Check if search text matches Path/URL (index 1) or Note (index 5)
+                path_url = str(row_data[1]).lower() if row_data[1] else ""
+                note = str(row_data[5]).lower() if row_data[5] else ""
+                
+                if search_text in path_url or search_text in note:
+                    # Update row number and add to table
+                    filtered_row = row_data[:]  # Copy the row
+                    filtered_row[0] = str(row_number)  # Update row number
+                    self._watch_table_model.addRow(filtered_row)
+                    row_number += 1
+            
+            # Update status
+            total_rows = len(self._original_watch_data)
+            filtered_rows = self._watch_table_model.getRowCount()
+            self._status_label.setText("Showing {} of {} paths (filtered)".format(filtered_rows, total_rows))
+            
+        except Exception as e:
+            print("Error filtering watch table: {}".format(str(e)))
+    
+    def _store_original_watch_data(self):
+        """Store current table data for filtering"""
+        try:
+            if not hasattr(self, '_watch_table_model'):
+                return
+            
+            self._original_watch_data = []
+            for row in range(self._watch_table_model.getRowCount()):
+                row_data = []
+                for col in range(self._watch_table_model.getColumnCount()):
+                    row_data.append(self._watch_table_model.getValueAt(row, col))
+                self._original_watch_data.append(row_data)
+                
+        except Exception as e:
+            print("Error storing original watch data: {}".format(str(e)))
+    
+    def _restore_original_watch_data(self):
+        """Restore original table data (remove filter)"""
+        try:
+            if not hasattr(self, '_original_watch_data') or not hasattr(self, '_watch_table_model'):
+                return
+            
+            # Clear current table
+            self._watch_table_model.setRowCount(0)
+            
+            # Restore original data
+            for row_data in self._original_watch_data:
+                self._watch_table_model.addRow(row_data)
+            
+            # Update status
+            total_rows = len(self._original_watch_data)
+            self._status_label.setText("Ready - {} paths in watch list".format(total_rows))
+            
+        except Exception as e:
+            print("Error restoring original watch data: {}".format(str(e)))
+    
+    def _clear_watch_search(self, event):
+        """Clear search field and restore full table"""
+        try:
+            if hasattr(self, '_watch_search_field'):
+                self._watch_search_field.setText("")
+            # The document listener will automatically trigger _filter_watch_table()
+            
+        except Exception as e:
+            print("Error clearing watch search: {}".format(str(e)))
+    
+    def _filter_vuln_table(self):
+        """Filter vulnerability table based on search text"""
+        try:
+            if not hasattr(self, '_vuln_search_field') or not hasattr(self, '_vuln_table_model'):
+                return
+            
+            search_text = self._vuln_search_field.getText().lower().strip()
+            
+            # If search is empty, restore original data
+            if not search_text:
+                self._restore_original_vuln_data()
+                return
+            
+            # Store original data if not already stored
+            if not hasattr(self, '_original_vuln_data') or not self._original_vuln_data:
+                self._store_original_vuln_data()
+            
+            # Clear current table
+            self._vuln_table_model.setRowCount(0)
+            
+            # Filter and add matching rows
+            for row_data in self._original_vuln_data:
+                # Check if search text matches URL (index 3) or Note (index 4)
+                url = str(row_data[3]).lower() if row_data[3] else ""
+                note = str(row_data[4]).lower() if row_data[4] else ""
+                
+                if search_text in url or search_text in note:
+                    # Add to table
+                    self._vuln_table_model.addRow(row_data)
+            
+            # Update stats
+            total_rows = len(self._original_vuln_data)
+            filtered_rows = self._vuln_table_model.getRowCount()
+            self._vuln_stats_label.setText("Showing {} of {} vulnerabilities (filtered)".format(filtered_rows, total_rows))
+            
+        except Exception as e:
+            print("Error filtering vulnerability table: {}".format(str(e)))
+    
+    def _store_original_vuln_data(self):
+        """Store current vulnerability table data for filtering"""
+        try:
+            if not hasattr(self, '_vuln_table_model'):
+                return
+            
+            self._original_vuln_data = []
+            for row in range(self._vuln_table_model.getRowCount()):
+                row_data = []
+                for col in range(self._vuln_table_model.getColumnCount()):
+                    row_data.append(self._vuln_table_model.getValueAt(row, col))
+                self._original_vuln_data.append(row_data)
+                
+        except Exception as e:
+            print("Error storing original vulnerability data: {}".format(str(e)))
+    
+    def _restore_original_vuln_data(self):
+        """Restore original vulnerability table data (remove filter)"""
+        try:
+            if not hasattr(self, '_original_vuln_data') or not hasattr(self, '_vuln_table_model'):
+                return
+            
+            # Clear current table
+            self._vuln_table_model.setRowCount(0)
+            
+            # Restore original data
+            for row_data in self._original_vuln_data:
+                self._vuln_table_model.addRow(row_data)
+            
+            # Update stats
+            total_rows = len(self._original_vuln_data)
+            self._vuln_stats_label.setText("Total Vulnerabilities: {}".format(total_rows))
+            
+        except Exception as e:
+            print("Error restoring original vulnerability data: {}".format(str(e)))
+    
+    def _clear_vuln_search(self, event):
+        """Clear vulnerability search field and restore full table"""
+        try:
+            if hasattr(self, '_vuln_search_field'):
+                self._vuln_search_field.setText("")
+            # The document listener will automatically trigger _filter_vuln_table()
+            
+        except Exception as e:
+            print("Error clearing vulnerability search: {}".format(str(e)))
     
     def _sync_table_to_text(self):
         """Sync table data to text area"""
@@ -6896,9 +7355,14 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             if selected_filter != "All Vulnerabilities":
                 filter_cwe = selected_filter.split(" - ")[0]
             
-            # Add vulnerabilities to table
+            # Add vulnerabilities to table - sorted by timestamp (oldest first)
             with self._vuln_lock:
-                for vuln_id, vuln in self._vulnerabilities.items():
+                # Sort vulnerabilities by timestamp
+                sorted_vulns = sorted(self._vulnerabilities.items(), 
+                                    key=lambda x: x[1].get('timestamp', ''), 
+                                    reverse=False)  # False = oldest first, True = newest first
+                
+                for vuln_id, vuln in sorted_vulns:
                     # Apply filter
                     if filter_cwe and vuln['cwe'] != filter_cwe:
                         continue
@@ -6928,12 +7392,19 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             else:
                 self._vuln_stats_label.setText("Total: {} vulnerabilities across {} unique requests".format(
                     total_count, unique_requests))
+            
+            # Store original vulnerability data for search filtering
+            self._store_original_vuln_data()
                 
         except Exception as e:
             print("Error refreshing vulnerability table: {}".format(str(e)))
     
     def _filter_vulnerabilities(self):
         """Filter vulnerabilities based on selected CWE type"""
+        # Clear search field when using CWE filter
+        if hasattr(self, '_vuln_search_field'):
+            self._vuln_search_field.setText("")
+        
         self._refresh_vulnerability_table()
     
     def _remove_vulnerability_at_row(self, row):
@@ -7003,13 +7474,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             with self._vuln_lock:
                 # Prepare data for export - apply filter
                 filtered_vulns = []
-                
                 for vuln_id, vuln in self._vulnerabilities.items():
                     # Apply the same filter as the table
                     if filter_cwe and vuln['cwe'] != filter_cwe:
                         continue
                     filtered_vulns.append((vuln_id, vuln))
-                
+
+                # Sort by timestamp (oldest first)
+                filtered_vulns.sort(key=lambda x: x[1].get('timestamp', ''), reverse=False)
+
                 if len(filtered_vulns) == 0:
                     JOptionPane.showMessageDialog(
                         self._main_panel,
@@ -7018,7 +7491,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         JOptionPane.INFORMATION_MESSAGE
                     )
                     return
-                
+
                 # Export based on format
                 if export_format.startswith("Text"):
                     self._export_as_text(filtered_vulns, filter_cwe)
@@ -7781,6 +8254,9 @@ class CWEMessageEditorTab(IMessageEditorTab):
                 if vuln['request_hash'] == request_hash:
                     matching_vulns.append((vuln_id, vuln))
         
+        # Sort by timestamp (oldest first)
+        matching_vulns.sort(key=lambda x: x[1].get('timestamp', ''), reverse=False)
+        
         # Add to table
         for vuln_id, vuln in matching_vulns:
             row_data = [
@@ -7874,7 +8350,13 @@ class CWEMessageEditorTab(IMessageEditorTab):
                 }
                 
                 # Save to database
-                self._extender._save_vulnerability_to_database(vuln_id, self._extender._vulnerabilities[vuln_id])
+                save_success = self._extender._save_vulnerability_to_database(vuln_id, self._extender._vulnerabilities[vuln_id])
+                
+                if not save_success:
+                    # Remove from memory if save failed
+                    del self._extender._vulnerabilities[vuln_id]
+                    self._extender._vuln_counter -= 1
+                    raise Exception("Failed to save vulnerability to file")
             
             # Update the main vulnerabilities tab
             self._extender._refresh_vulnerability_table()
