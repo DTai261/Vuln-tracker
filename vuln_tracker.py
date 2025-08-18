@@ -44,6 +44,24 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error extracting path: {}".format(str(e)))
             return str(url)
     
+    def _get_url_without_params(self, url):
+        """Extract the full URL without query parameters for consistent matching"""
+        try:
+            url_str = str(url)
+            
+            # Remove query parameters (everything after ?)
+            if '?' in url_str:
+                url_str = url_str.split('?')[0]
+            
+            # Remove fragment (everything after #)
+            if '#' in url_str:
+                url_str = url_str.split('#')[0]
+            
+            return url_str
+        except Exception as e:
+            print("Error extracting URL: {}".format(str(e)))
+            return str(url)
+    
     def _create_request_hash(self, url, method):
         """Create a consistent hash for requests, ignoring query parameters"""
         try:
@@ -58,10 +76,17 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             
             # Create hash from method + host + path (without query params)
             hash_string = "{}:{}{}".format(method, host, path)
-            return hash(hash_string)
+            request_hash = hash(hash_string)
+            
+            print("DEBUG: _create_request_hash - URL: {}, Method: {}, Path: {}, Host: {}, Hash String: '{}', Hash: {}".format(
+                str(url), method, path, host, hash_string, request_hash))
+            
+            return request_hash
         except Exception as e:
-            print("Error creating request hash: {}".format(str(e)))
-            return hash(str(url) + method)
+            print("ERROR: Error creating request hash: {}".format(str(e)))
+            fallback_hash = hash(str(url) + method)
+            print("DEBUG: Using fallback hash: {}".format(fallback_hash))
+            return fallback_hash
     
     def _highlight_tab_success(self):
         """Provide visual feedback for successful operations by highlighting the tab"""
@@ -143,7 +168,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     # Show the specific message
                     original_text = self._status_label.getText()
                     self._status_label.setText(message)
-                    print("Status: {}".format(message))
+                    # print("Status: {}".format(message))
                     
                     # Create timer to restore original text after 3 seconds
                     from javax.swing import Timer
@@ -892,6 +917,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             'method': vuln.get('method', 'GET'),
                             'timestamp': vuln.get('timestamp', ''),
                             'request_hash': vuln.get('request_hash', 0),
+                            'fixed': vuln.get('fixed', False),  # Load fixed status
                             'message': None  # Message objects can't be persisted
                         }
                         # Update counter to avoid ID conflicts
@@ -1045,69 +1071,93 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     
     def _save_data_to_file(self, data):
         """Save data to JSON file with timeout protection and enhanced error handling"""
+        print("=== SAVE DATA TO FILE DEBUG START ===")
+        print("DEBUG: Saving data to file: {}".format(self._data_file_path))
+        print("DEBUG: Data contains {} vulnerabilities".format(len(data.get("vulnerabilities", {}))))
+        
         import time
         
         try:
             # Use a temporary file for atomic writes
             temp_path = self._data_file_path + ".tmp"
+            print("DEBUG: Using temporary file: {}".format(temp_path))
             
             # Write to temporary file first
+            print("DEBUG: Writing data to temporary file...")
             with open(temp_path, 'w') as f:
                 json.dump(data, f, indent=2)
                 f.flush()  # Ensure data is written to disk
                 os.fsync(f.fileno())  # Force write to disk
+            print("DEBUG: Successfully wrote data to temporary file")
             
             # Verify the temporary file was written correctly
+            print("DEBUG: Verifying temporary file...")
             try:
                 with open(temp_path, 'r') as f:
                     test_data = json.load(f)
                 if not isinstance(test_data, dict):
                     raise Exception("Temporary file verification failed - invalid JSON structure")
+                print("DEBUG: Temporary file verification successful. Contains {} vulnerabilities".format(
+                    len(test_data.get("vulnerabilities", {}))))
             except Exception as verify_error:
-                print("Error verifying temporary file: {}".format(str(verify_error)))
+                print("ERROR: Error verifying temporary file: {}".format(str(verify_error)))
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 return False
             
             # Atomic move (Windows-safe implementation with retries)
+            print("DEBUG: Performing atomic move...")
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     if os.path.exists(self._data_file_path):
+                        print("DEBUG: Removing existing data file...")
                         os.remove(self._data_file_path)
+                    print("DEBUG: Renaming temp file to data file (attempt {})...".format(attempt + 1))
                     os.rename(temp_path, self._data_file_path)
+                    print("DEBUG: Successfully moved temporary file to data file")
                     break  # Success
                     
                 except Exception as move_error:
-                    print("Error moving temp file (attempt {}): {}".format(attempt + 1, str(move_error)))
+                    print("ERROR: Error moving temp file (attempt {}): {}".format(attempt + 1, str(move_error)))
                     if attempt == max_retries - 1:
                         # Final attempt - try copy instead
+                        print("DEBUG: Final attempt failed, trying copy instead...")
                         try:
                             import shutil
                             if os.path.exists(self._data_file_path):
                                 os.remove(self._data_file_path)
                             shutil.copy2(temp_path, self._data_file_path)
                             os.remove(temp_path)
+                            print("DEBUG: Successfully copied temp file as fallback")
                         except Exception as copy_error:
-                            print("Error copying temp file: {}".format(str(copy_error)))
+                            print("ERROR: Error copying temp file: {}".format(str(copy_error)))
                             return False
                     else:
                         time.sleep(0.1)  # Brief delay before retry
             
             # Verify the final file was saved correctly
+            print("DEBUG: Verifying final saved file...")
             try:
                 with open(self._data_file_path, 'r') as f:
                     final_data = json.load(f)
                 if not isinstance(final_data, dict):
                     raise Exception("Final file verification failed - invalid JSON structure")
+                print("DEBUG: Final file verification successful. Contains {} vulnerabilities".format(
+                    len(final_data.get("vulnerabilities", {}))))
             except Exception as final_verify_error:
-                print("Error verifying final saved file: {}".format(str(final_verify_error)))
+                print("ERROR: Error verifying final saved file: {}".format(str(final_verify_error)))
                 return False
             
+            print("SUCCESS: Data successfully saved to file")
+            print("=== SAVE DATA TO FILE DEBUG END ===")
             return True  # Success
                 
         except Exception as e:
-            print("Error saving data to file: {}".format(str(e)))
+            print("ERROR: Exception in _save_data_to_file: {}".format(str(e)))
+            print("ERROR: Exception type: {}".format(type(e).__name__))
+            import traceback
+            print("ERROR: Stack trace: {}".format(traceback.format_exc()))
             # Clean up temp file if it exists
             temp_path = self._data_file_path + ".tmp"
             if os.path.exists(temp_path):
@@ -1262,7 +1312,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     except Exception as save_error:
                         print("Error saving repaired audit data: {}".format(str(save_error)))
                 else:
-                    print("watch_list_audit data structure is valid, no repairs needed")
+                    # print("watch_list_audit data structure is valid, no repairs needed")
+                    pass
                     
             return data
             
@@ -1376,36 +1427,94 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     
     def _save_vulnerability_to_database(self, vuln_id, vulnerability):
         """Save a single vulnerability to JSON file"""
+        print("=== SAVE VULNERABILITY TO DATABASE DEBUG START ===")
+        print("DEBUG: Saving vuln_id: {}, vulnerability: {}".format(vuln_id, vulnerability))
+        
         try:
+            print("DEBUG: Loading data from file...")
             data = self._load_data_from_file()
             
-            # Update vulnerabilities
-            data["vulnerabilities"][str(vuln_id)] = {
+            if not data:
+                print("ERROR: No data loaded from file")
+                return False
+            
+            print("DEBUG: Current vulnerabilities in file: {}".format(len(data.get("vulnerabilities", {}))))
+            
+            # Create vulnerability data for file
+            vuln_data_for_file = {
                 'cwe': vulnerability['cwe'],
                 'description': vulnerability['description'],
                 'url': vulnerability['url'],
                 'method': vulnerability['method'],
                 'timestamp': vulnerability['timestamp'],
-                'request_hash': vulnerability['request_hash']
+                'request_hash': vulnerability['request_hash'],
+                'fixed': vulnerability.get('fixed', False)  # Include fixed status
             }
+            print("DEBUG: Vulnerability data prepared for file: {}".format(vuln_data_for_file))
+            
+            # Update vulnerabilities
+            data["vulnerabilities"][str(vuln_id)] = vuln_data_for_file
+            print("DEBUG: Added vulnerability to data structure with key: {}".format(str(vuln_id)))
             
             # Update the max ID for generating unique IDs
             if "max_vuln_id" not in data:
                 data["max_vuln_id"] = data.get("vuln_counter", 0)
+                print("DEBUG: Initialized max_vuln_id to: {}".format(data["max_vuln_id"]))
+            
+            old_max_id = data["max_vuln_id"]
             data["max_vuln_id"] = max(data.get("max_vuln_id", 0), vuln_id)
+            print("DEBUG: Updated max_vuln_id from {} to {}".format(old_max_id, data["max_vuln_id"]))
             
             # Update counter to reflect actual count
+            old_counter = data.get("vuln_counter", 0)
             data["vuln_counter"] = len(data["vulnerabilities"])
+            print("DEBUG: Updated vuln_counter from {} to {}".format(old_counter, data["vuln_counter"]))
+            
+            print("DEBUG: About to save data to file...")
+            print("DEBUG: Data to save contains {} vulnerabilities".format(len(data["vulnerabilities"])))
             
             save_success = self._save_data_to_file(data)
+            print("DEBUG: Save data to file result: {}".format(save_success))
+            
             if not save_success:
-                print("Failed to save vulnerability data to file")
+                print("ERROR: Failed to save vulnerability data to file")
                 return False
             
+            # CRITICAL: Update self._data to keep it in sync
+            if hasattr(self, '_data'):
+                print("DEBUG: Updating self._data to keep it in sync...")
+                old_vuln_count = len(self._data.get("vulnerabilities", {}))
+                self._data["vulnerabilities"] = data["vulnerabilities"]
+                self._data["vuln_counter"] = data["vuln_counter"]
+                if "max_vuln_id" in data:
+                    self._data["max_vuln_id"] = data["max_vuln_id"]
+                new_vuln_count = len(self._data.get("vulnerabilities", {}))
+                print("DEBUG: Updated self._data vulnerabilities from {} to {}".format(old_vuln_count, new_vuln_count))
+            else:
+                print("WARNING: self._data not available for sync")
+            
+            print("SUCCESS: Vulnerability saved successfully")
+            
+            # VERIFICATION: Read back the file to confirm it was saved
+            print("DEBUG: VERIFICATION - Reading back saved data...")
+            verification_data = self._load_data_from_file()
+            if verification_data and str(vuln_id) in verification_data.get("vulnerabilities", {}):
+                saved_vuln = verification_data["vulnerabilities"][str(vuln_id)]
+                print("DEBUG: VERIFICATION SUCCESS - Found saved vulnerability:")
+                print("DEBUG: Saved CWE: {}, URL: {}, Method: {}, Fixed: {}".format(
+                    saved_vuln.get('cwe'), saved_vuln.get('url'), saved_vuln.get('method'), saved_vuln.get('fixed')))
+            else:
+                print("ERROR: VERIFICATION FAILED - Vulnerability not found in file after save!")
+                return False
+            
+            print("=== SAVE VULNERABILITY TO DATABASE DEBUG END ===")
             return True  # Success
             
         except Exception as e:
-            print("Error saving vulnerability to file: {}".format(str(e)))
+            print("ERROR: Exception in _save_vulnerability_to_database: {}".format(str(e)))
+            print("ERROR: Exception type: {}".format(type(e).__name__))
+            import traceback
+            print("ERROR: Stack trace: {}".format(traceback.format_exc()))
             return False  # Failure
     
     def _remove_vulnerability_from_database(self, vuln_id):
@@ -1433,6 +1542,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 print("Failed to save vulnerability removal to file")
                 return False
             
+            # CRITICAL: Update self._data to keep it in sync
+            if hasattr(self, '_data'):
+                self._data["vulnerabilities"] = data["vulnerabilities"]
+                self._data["vuln_counter"] = data["vuln_counter"]
+                if "max_vuln_id" in data:
+                    self._data["max_vuln_id"] = data["max_vuln_id"]
+            
             return True
             
         except Exception as e:
@@ -1444,18 +1560,39 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         try:
             # Get current audit data and save it
             if hasattr(self, '_data') and 'watch_list_audit' in self._data:
-                data = self._load_data_from_file()
-                
-                # Update from current audit data
-                data["watch_list_audit"] = self._data['watch_list_audit']
-                
-                # Save data
-                self._save_data_to_file(data)
+                # Load fresh data from file to preserve vulnerabilities
+                fresh_data = self._load_data_from_file()
+                if fresh_data:
+                    # Update only the watch list part, preserve everything else
+                    fresh_data["watch_list_audit"] = self._data['watch_list_audit']
+                    self._save_data_to_file(fresh_data)
+                else:
+                    # Fallback to original method if file loading fails
+                    data = self._load_data_from_file()
+                    data["watch_list_audit"] = self._data['watch_list_audit']
+                    self._save_data_to_file(data)
             else:
                 print("No watch_list_audit data available to save")
             
         except Exception as e:
             print("Error saving watch list to file: {}".format(str(e)))
+    
+    def _sync_data_with_file(self):
+        """Synchronize self._data with current file data to prevent data loss"""
+        try:
+            fresh_data = self._load_data_from_file()
+            if fresh_data and hasattr(self, '_data'):
+                # Update vulnerabilities in self._data with fresh file data
+                self._data["vulnerabilities"] = fresh_data.get("vulnerabilities", {})
+                self._data["vuln_counter"] = fresh_data.get("vuln_counter", 0)
+                if "max_vuln_id" in fresh_data:
+                    self._data["max_vuln_id"] = fresh_data["max_vuln_id"]
+                print("Synchronized self._data with file data ({} vulnerabilities)".format(
+                    len(self._data["vulnerabilities"])))
+                return True
+        except Exception as e:
+            print("Error synchronizing data with file: {}".format(str(e)))
+        return False
     
     def _clear_all_data_from_database(self):
         """Clear all vulnerabilities from JSON file"""
@@ -1928,7 +2065,42 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         self._create_watch_list_tab()
         self._create_vulnerabilities_tab()
         
+        # Add tab change listener to refresh vulnerabilities when tab is selected
+        self._add_tab_change_listener()
+        
         self._main_panel.add(self._tabbed_pane, BorderLayout.CENTER)
+    
+    def _add_tab_change_listener(self):
+        """Add listener to refresh vulnerabilities tab when it's selected"""
+        try:
+            from javax.swing.event import ChangeListener
+            
+            class TabChangeListener(ChangeListener):
+                def __init__(self, extension_parent):
+                    self.extension_parent = extension_parent
+                    self.last_refresh_time = 0
+                
+                def stateChanged(self, event):
+                    # Get the selected tab index
+                    selected_index = event.getSource().getSelectedIndex()
+                    
+                    # If vulnerabilities tab is selected (index 1), refresh the data
+                    if selected_index == 1:  # Vulnerabilities tab
+                        try:
+                            # Throttle refreshes to avoid excessive file reads
+                            import time
+                            current_time = time.time()
+                            if current_time - self.last_refresh_time > 0.5:  # Minimum 500ms between refreshes
+                                self.extension_parent._refresh_vulnerability_table()
+                                self.last_refresh_time = current_time
+                        except Exception as e:
+                            print("Error refreshing vulnerabilities tab: {}".format(str(e)))
+            
+            # Add the listener to the tabbed pane
+            self._tabbed_pane.addChangeListener(TabChangeListener(self))
+            
+        except Exception as e:
+            print("Error adding tab change listener: {}".format(str(e)))
     
     def _create_watch_list_tab(self):
         """Create the watch list management tab"""
@@ -2679,6 +2851,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 'method': method,
                                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 'request_hash': request_hash,
+                                'fixed': False,  # New vulnerabilities start as not fixed
                                 'message': None  # No actual request message available
                             }
                             
@@ -2844,6 +3017,16 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
         self._cwe_filter = JComboBox(cwe_items)
         self._cwe_filter.addActionListener(lambda e: self._filter_vulnerabilities())
         top_panel.add(self._cwe_filter)
+        
+        # Add some spacing
+        top_panel.add(Box.createHorizontalStrut(20))
+        
+        # Fixed status filter
+        top_panel.add(JLabel("Filter by Status:"))
+        fixed_status_items = ["All Status", "Fixed", "Not Fixed"]
+        self._fixed_status_filter = JComboBox(fixed_status_items)
+        self._fixed_status_filter.addActionListener(lambda e: self._filter_vulnerabilities())
+        top_panel.add(self._fixed_status_filter)
         
         # Clear vulnerabilities button
         clear_vuln_btn = JButton("Clear All Vulnerabilities", actionPerformed=self._clear_vulnerabilities)
@@ -3041,6 +3224,43 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     # Separator
                     popup.addSeparator()
                     
+                    # Mark as Fixed/Not Fixed options
+                    # Check if any selected vulnerabilities are fixed
+                    any_fixed = False
+                    any_not_fixed = False
+                    
+                    for row_idx in selected_rows:
+                        vuln_data = self.extension_parent._get_vulnerability_at_row(row_idx)
+                        if vuln_data and vuln_data.get('fixed', False):
+                            any_fixed = True
+                        else:
+                            any_not_fixed = True
+                    
+                    # Add "Mark as Fixed" option if there are unfixed vulnerabilities
+                    if any_not_fixed:
+                        if len(selected_rows) == 1:
+                            mark_fixed_text = "Mark as Fixed"
+                        else:
+                            mark_fixed_text = "Mark {} as Fixed".format(len(selected_rows))
+                        
+                        mark_fixed_item = JMenuItem(mark_fixed_text)
+                        mark_fixed_item.addActionListener(lambda e: self.extension_parent._mark_vulnerabilities_as_fixed(True))
+                        popup.add(mark_fixed_item)
+                    
+                    # Add "Mark as Not Fixed" option if there are fixed vulnerabilities  
+                    if any_fixed:
+                        if len(selected_rows) == 1:
+                            mark_not_fixed_text = "Mark as Not Fixed"
+                        else:
+                            mark_not_fixed_text = "Mark {} as Not Fixed".format(len(selected_rows))
+                        
+                        mark_not_fixed_item = JMenuItem(mark_not_fixed_text)
+                        mark_not_fixed_item.addActionListener(lambda e: self.extension_parent._mark_vulnerabilities_as_fixed(False))
+                        popup.add(mark_not_fixed_item)
+                    
+                    # Separator
+                    popup.addSeparator()
+                    
                     # Delete option
                     if len(selected_rows) == 1:
                         delete_text = "Delete Vulnerability"
@@ -3070,6 +3290,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 component = DefaultTableCellRenderer.getTableCellRendererComponent(
                     self, table, value, isSelected, hasFocus, row, column)
                 
+                # Check if this vulnerability is marked as fixed
+                is_fixed = False
+                try:
+                    vuln_data = self.extension_parent._get_vulnerability_at_row(row)
+                    if vuln_data:
+                        is_fixed = vuln_data.get('fixed', False)
+                except:
+                    pass  # If error checking fixed status, treat as not fixed
+                
                 # Default colors
                 if isSelected:
                     component.setBackground(table.getSelectionBackground())
@@ -3083,12 +3312,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             break
                     
                     if mouse_listener and row == mouse_listener.last_hover_row:
-                        # Light blue highlight for hover
-                        component.setBackground(Color(230, 240, 255))
+                        # Light blue highlight for hover (slightly different for fixed items)
+                        if is_fixed:
+                            component.setBackground(Color(150, 255, 150))  # Stronger green hover for fixed
+                        else:
+                            component.setBackground(Color(230, 240, 255))  # Light blue hover for normal
                         component.setForeground(Color.BLACK)
                     else:
-                        component.setBackground(table.getBackground())
-                        component.setForeground(table.getForeground())
+                        # Normal row colors
+                        if is_fixed:
+                            component.setBackground(Color(180, 255, 180))  # Stronger green for fixed
+                            component.setForeground(Color(0, 120, 0))      # Darker green text
+                        else:
+                            component.setBackground(table.getBackground())
+                            component.setForeground(table.getForeground())
                 
                 return component
         
@@ -3099,6 +3336,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 self.setOpaque(True)
             
             def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                # Check if this vulnerability is marked as fixed
+                is_fixed = False
+                try:
+                    vuln_data = self.extension_parent._get_vulnerability_at_row(row)
+                    if vuln_data:
+                        is_fixed = vuln_data.get('fixed', False)
+                except:
+                    pass  # If error checking fixed status, treat as not fixed
+                
                 # Handle colors and selection
                 if isSelected:
                     self.setBackground(table.getSelectionBackground())
@@ -3112,12 +3358,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             break
                     
                     if mouse_listener and row == mouse_listener.last_hover_row:
-                        # Light blue highlight for hover
-                        self.setBackground(Color(230, 240, 255))
+                        # Light hover colors (slightly different for fixed items)
+                        if is_fixed:
+                            self.setBackground(Color(150, 255, 150))  # Stronger green hover for fixed
+                        else:
+                            self.setBackground(Color(230, 240, 255))  # Light blue hover for normal
                         self.setForeground(Color.BLACK)
                     else:
-                        self.setBackground(table.getBackground())
-                        self.setForeground(table.getForeground())
+                        # Normal colors
+                        if is_fixed:
+                            self.setBackground(Color(180, 255, 180))  # Stronger green for fixed
+                            self.setForeground(Color(0, 120, 0))      # Darker green text
+                        else:
+                            self.setBackground(table.getBackground())
+                            self.setForeground(table.getForeground())
                 
                 return self
         
@@ -3172,15 +3426,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                 vuln_data.get('timestamp') == timestamp):
                                 vuln_ids_to_delete.append(vuln_id)
                                 vuln_found = True
-                                print("DEBUG: Found vulnerability ID {} for deletion".format(vuln_id))
+                                # print("DEBUG: Found vulnerability ID {} for deletion".format(vuln_id))
                                 break
                     
                     if not vuln_found:
                         print("WARNING: Could not find vulnerability for row {} with data: CWE={}, URL={}, timestamp={}".format(
                             row, cwe, url, timestamp))
                 
-                print("DEBUG: Found {} vulnerabilities to delete out of {} selected rows".format(
-                    len(vuln_ids_to_delete), len(selected_rows)))
+                # print("DEBUG: Found {} vulnerabilities to delete out of {} selected rows".format(
+                #     len(vuln_ids_to_delete), len(selected_rows)))
                 
                 # Remove rows in reverse order to maintain indices
                 for row in sorted(selected_rows, reverse=True):
@@ -3193,17 +3447,17 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     for vuln_id in vuln_ids_to_delete:
                         if vuln_id in self._vulnerabilities:
                             del self._vulnerabilities[vuln_id]
-                            print("DEBUG: Removed vulnerability {} from memory".format(vuln_id))
+                            # print("DEBUG: Removed vulnerability {} from memory".format(vuln_id))
                         
                         # Remove from database file
                         if self._remove_vulnerability_from_database(vuln_id):
                             deleted_count += 1
-                            print("DEBUG: Removed vulnerability {} from database".format(vuln_id))
+                            # print("DEBUG: Removed vulnerability {} from database".format(vuln_id))
                         else:
                             failed_deletes += 1
                             print("ERROR: Failed to delete vulnerability {} from database".format(vuln_id))
                 
-                print("DEBUG: Successfully deleted {} vulnerabilities from database".format(deleted_count))
+                # print("DEBUG: Successfully deleted {} vulnerabilities from database".format(deleted_count))
                 if failed_deletes > 0:
                     print("WARNING: Failed to delete {} vulnerabilities from database".format(failed_deletes))
                 
@@ -3336,12 +3590,108 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error removing vulnerability: {}".format(str(e)))
             self._show_status_feedback("Error removing vulnerability: {}".format(str(e)))
     
+    def _get_vulnerability_at_row(self, row):
+        """Get vulnerability data for a specific table row"""
+        try:
+            if row < 0 or row >= self._vuln_table_model.getRowCount():
+                return None
+            
+            # Get data from table row
+            cwe = self._vuln_table_model.getValueAt(row, 0)
+            description = self._vuln_table_model.getValueAt(row, 1)
+            method = self._vuln_table_model.getValueAt(row, 2)
+            url = self._vuln_table_model.getValueAt(row, 3)
+            timestamp = self._vuln_table_model.getValueAt(row, 5)
+            
+            # Find matching vulnerability in internal data
+            with self._vuln_lock:
+                for vuln_id, vuln_data in self._vulnerabilities.items():
+                    if (vuln_data.get('cwe') == cwe and 
+                        vuln_data.get('description') == description and
+                        vuln_data.get('method') == method and
+                        vuln_data.get('url') == url and
+                        vuln_data.get('timestamp') == timestamp):
+                        return vuln_data
+            
+            return None
+            
+        except Exception as e:
+            print("Error getting vulnerability at row {}: {}".format(row, str(e)))
+            return None
+    
+    def _mark_vulnerabilities_as_fixed(self, fixed_status):
+        """Mark selected vulnerabilities as fixed or not fixed"""
+        try:
+            selected_rows = self._vuln_table.getSelectedRows()
+            if not selected_rows:
+                self._show_status_feedback("No vulnerabilities selected")
+                return
+            
+            fixed_count = 0
+            
+            # Process each selected row
+            for row in selected_rows:
+                # Get vulnerability data
+                cwe = self._vuln_table_model.getValueAt(row, 0)
+                description = self._vuln_table_model.getValueAt(row, 1)
+                method = self._vuln_table_model.getValueAt(row, 2)
+                url = self._vuln_table_model.getValueAt(row, 3)
+                timestamp = self._vuln_table_model.getValueAt(row, 5)
+                
+                # Find matching vulnerability ID in internal data
+                vuln_id_to_update = None
+                with self._vuln_lock:
+                    for vuln_id, vuln_data in self._vulnerabilities.items():
+                        if (vuln_data.get('cwe') == cwe and 
+                            vuln_data.get('description') == description and
+                            vuln_data.get('method') == method and
+                            vuln_data.get('url') == url and
+                            vuln_data.get('timestamp') == timestamp):
+                            vuln_id_to_update = vuln_id
+                            break
+                
+                if vuln_id_to_update is not None:
+                    # Update the fixed status in memory
+                    with self._vuln_lock:
+                        self._vulnerabilities[vuln_id_to_update]['fixed'] = fixed_status
+                    
+                    # Save to database
+                    if self._save_vulnerability_to_database(vuln_id_to_update, self._vulnerabilities[vuln_id_to_update]):
+                        fixed_count += 1
+                    else:
+                        print("Failed to save fixed status for vulnerability {}".format(vuln_id_to_update))
+            
+            # Refresh the table to show color changes
+            self._refresh_vulnerability_table()
+            
+            # Show feedback
+            if fixed_status:
+                status_text = "fixed"
+            else:
+                status_text = "not fixed"
+            
+            if fixed_count == 1:
+                self._show_status_feedback("Marked 1 vulnerability as {}".format(status_text))
+            else:
+                self._show_status_feedback("Marked {} vulnerabilities as {}".format(fixed_count, status_text))
+            
+        except Exception as e:
+            print("Error marking vulnerabilities as fixed: {}".format(str(e)))
+            self._show_status_feedback("Error updating fixed status: {}".format(str(e)))
+    
     def _update_vulnerability_stats(self):
         """Update vulnerability statistics display"""
         try:
             total_count = len(self._vulnerabilities)
             displayed_count = self._vuln_table_model.getRowCount()
-            unique_requests = len(set(v['request_hash'] for v in self._vulnerabilities.values())) if self._vulnerabilities else 0
+            
+            # Calculate unique requests using URL+method combination
+            unique_request_keys = set()
+            for v in self._vulnerabilities.values():
+                clean_url = self._get_url_without_params(v.get('url', ''))
+                method = v.get('method', 'GET').upper()
+                unique_request_keys.add("{}:{}".format(method, clean_url))
+            unique_requests = len(unique_request_keys)
             
             # Update the stats label
             if hasattr(self, '_vuln_stats_label'):
@@ -4036,13 +4386,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 return
             
             # Show configuration dialog
-            print("DEBUG: Showing configuration dialog...")
+            # print("DEBUG: Showing configuration dialog...")
             config = self._show_sitemap_import_config()
             if not config:
-                print("DEBUG: User cancelled configuration dialog")
+                # print("DEBUG: User cancelled configuration dialog")
                 return  # User cancelled
             
-            print("DEBUG: Configuration received - Target: {}".format(config.get("target", "None")))
+            # print("DEBUG: Configuration received - Target: {}".format(config.get("target", "None")))
             
             # Get sitemap data from Burp
             sitemap_data = self._extract_sitemap_data(config)
@@ -4054,20 +4404,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Process and filter the endpoints
             filtered_endpoints = self._filter_sitemap_endpoints(sitemap_data, config)
             if not filtered_endpoints:
-                print("DEBUG: No endpoints passed filtering")
+                # print("DEBUG: No endpoints passed filtering")
                 self._show_status_feedback("No endpoints match the filter criteria")
                 return
             
-            print("DEBUG: {} endpoints passed filtering".format(len(filtered_endpoints)))
+            # print("DEBUG: {} endpoints passed filtering".format(len(filtered_endpoints)))
             
             # Add to watch list
-            print("DEBUG: Adding endpoints to watchlist...")
+            # print("DEBUG: Adding endpoints to watchlist...")
             imported_count = self._add_endpoints_to_watchlist(filtered_endpoints)
-            print("DEBUG: Added {} new endpoints to watchlist".format(imported_count))
+            # print("DEBUG: Added {} new endpoints to watchlist".format(imported_count))
             
             # Save configuration if auto-update is enabled
             if config.get("auto_update", False):
-                print("DEBUG: Saving sitemap configuration for auto-update")
+                # print("DEBUG: Saving sitemap configuration for auto-update")
                 self._sitemap_config = config
                 self._save_sitemap_config()
                 self._start_sitemap_monitoring()
@@ -4545,8 +4895,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                         
                         # Handle common MIME type mappings
                         if self._mime_type_matches(mime_type_str, excluded_mime_lower):
-                            print("DEBUG: Excluding {} due to MIME type {} matching filter {}".format(
-                                "response", mime_type_str, excluded_mime_lower))
+                            # print("DEBUG: Excluding {} due to MIME type {} matching filter {}".format(
+                            #     "response", mime_type_str, excluded_mime_lower))
                             return True
                 
             except Exception as mime_error:
@@ -5698,7 +6048,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     # Verify the save worked by reloading
                     verify_data = self._load_data_from_file()
                     saved_config = verify_data.get("settings", {}).get("sitemap_config", {})
-                    print("DEBUG: Verified saved patterns: {}".format(saved_config.get("exclude_patterns", [])))
+                    # print("DEBUG: Verified saved patterns: {}".format(saved_config.get("exclude_patterns", [])))
                     
                 except Exception as ex:
                     error_msg = "Error updating sitemap config: {}".format(str(ex))
@@ -6196,8 +6546,15 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 
                 # Clear internal data directly (don't use _save_watch_list_data which reads from table)
                 if hasattr(self, '_data'):
-                    self._data['watch_list_audit'] = []
-                    self._save_data_to_file(self._data)
+                    # Load fresh data to preserve vulnerabilities, then clear only watch list
+                    fresh_data = self._load_data_from_file()
+                    if fresh_data:
+                        fresh_data['watch_list_audit'] = []
+                        self._save_data_to_file(fresh_data)
+                    else:
+                        # Fallback - clear only watch list in current data
+                        self._data['watch_list_audit'] = []
+                        self._save_data_to_file(self._data)
                 
                 # Update status
                 self._status_label.setText("Ready - 0 paths in watch list")
@@ -6492,6 +6849,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 print("No current project to save watch list data")
                 return
             
+            # CRITICAL: Sync self._data with file data first to prevent overwriting vulnerabilities
+            if not self._sync_data_with_file():
+                print("Failed to sync data with file before saving watch list")
+                return
+            
             # Update audit status in existing internal data (preserving full URLs)
             if hasattr(self, '_watch_table_model') and hasattr(self, '_data') and 'watch_list_audit' in self._data:
                 # Make sure we have the same number of rows in table and internal data
@@ -6532,12 +6894,20 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                             print("WARNING: Row {} exceeds internal data length, skipping save".format(row))
                             return
                 else:
-                    print("Warning: Table rows ({}) and internal data ({}) count mismatch - skipping save to prevent data corruption".format(table_rows, internal_items))
+                    # print("Warning: Table rows ({}) and internal data ({}) count mismatch - skipping save to prevent data corruption".format(table_rows, internal_items))
                     return
                 
-                # Save to file using the correct method
-                self._save_data_to_file(self._data)
-                print("Updated audit status for {} watch list items (URLs preserved, data integrity maintained)".format(table_rows))
+                # Save to file using the correct method - load fresh data first to preserve vulnerabilities
+                fresh_data = self._load_data_from_file()
+                if fresh_data:
+                    # Update only the watch_list_audit part, preserve vulnerabilities
+                    fresh_data['watch_list_audit'] = self._data['watch_list_audit']
+                    self._save_data_to_file(fresh_data)
+                    print("Updated audit status for {} watch list items (vulnerabilities preserved)".format(table_rows))
+                else:
+                    # Fallback to original method if file loading fails
+                    self._save_data_to_file(self._data)
+                    print("Updated audit status for {} watch list items (fallback save)".format(table_rows))
             
         except Exception as e:
             print("Error saving watch list data: {}".format(str(e)))
@@ -6804,24 +7174,24 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
     def _auto_mark_as_audited(self, path, full_url, source_tool="Repeater"):
         """Automatically mark matching paths as audited when accessed from specified tool"""
         try:
-            print("DEBUG: _auto_mark_as_audited called - Path: {}, Full URL: {}, Tool: {}".format(path, full_url, source_tool))
+            # print("DEBUG: _auto_mark_as_audited called - Path: {}, Full URL: {}, Tool: {}".format(path, full_url, source_tool))
             
             if not hasattr(self, '_watch_table_model'):
-                print("DEBUG: No watch table model available")
+                # print("DEBUG: No watch table model available")
                 return
             
             # Find matching paths in the table and mark them as audited
             marked_count = 0
             table_row_count = self._watch_table_model.getRowCount()
-            print("DEBUG: Checking {} rows in watch table".format(table_row_count))
-            
+            # print("DEBUG: Checking {} rows in watch table".format(table_row_count))
+            # 
             for row in range(table_row_count):
                 table_path = self._watch_table_model.getValueAt(row, 1)  # Column 1 is now path/URL
-                print("DEBUG: Comparing table path '{}' with request path '{}' and full URL '{}'".format(table_path, path, full_url))
+                # print("DEBUG: Comparing table path '{}' with request path '{}' and full URL '{}'".format(table_path, path, full_url))
                 
                 # Check if this table entry matches the current request
                 is_match = self._is_match(table_path, path, full_url)
-                print("DEBUG: Match result: {}".format(is_match))
+                # print("DEBUG: Match result: {}".format(is_match))
                 
                 if is_match:
                     # Determine which column to update based on source tool
@@ -7253,14 +7623,19 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             url = request_info.getUrl()
             method = request_info.getMethod()
             
-            # Create hash for this request (for grouping purposes - ignoring query params)
+            # Get clean URL for comparison (remove query parameters for consistent matching)
+            clean_url = self._get_url_without_params(str(url))
+            
+            # Create hash for this request (kept for backward compatibility)
             request_hash = self._create_request_hash(url, method)
             
             # Check if this exact CWE already exists for this request
             with self._vuln_lock:
-                # Check for duplicate CWE on same request
+                # Check for duplicate CWE on same request using URL comparison
                 for vuln_id, vuln in self._vulnerabilities.items():
-                    if (vuln['request_hash'] == request_hash and 
+                    vuln_clean_url = self._get_url_without_params(vuln.get('url', ''))
+                    if (vuln_clean_url == clean_url and 
+                        vuln.get('method', 'GET').upper() == method.upper() and 
                         vuln['cwe'] == cwe_code):
                         # Show message that this CWE already exists
                         SwingUtilities.invokeLater(lambda: JOptionPane.showMessageDialog(
@@ -7283,7 +7658,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     'url': str(url),
                     'method': method,
                     'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'request_hash': request_hash,
+                    'request_hash': request_hash,  # Keep for backward compatibility
+                    'fixed': False,  # New vulnerabilities start as not fixed
                     'message': message  # Store reference for later use
                 }
                 
@@ -7296,8 +7672,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Switch to vulnerabilities tab
             self._tabbed_pane.setSelectedIndex(1)
             
-            # Count total vulnerabilities for this request
-            vuln_count = sum(1 for v in self._vulnerabilities.values() if v['request_hash'] == request_hash)
+            # Count total vulnerabilities for this request using URL-based matching
+            vuln_count = sum(1 for v in self._vulnerabilities.values() 
+                           if (self._get_url_without_params(v.get('url', '')) == clean_url and 
+                               v.get('method', 'GET').upper() == method.upper()))
             
             # Visual feedback instead of dialog
             self._highlight_tab_success()
@@ -7344,16 +7722,51 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             return ""
     
     def _refresh_vulnerability_table(self):
-        """Refresh the vulnerability table with current data"""
+        """Refresh the vulnerability table with current data - loads fresh data from file"""
         try:
-            # Clear existing rows
+            # Load fresh data from file to ensure we have the latest changes
+            file_data = self._load_data_from_file()
+            
+            # Update in-memory vulnerabilities with file data
+            if file_data and "vulnerabilities" in file_data:
+                with self._vuln_lock:
+                    # Clear current in-memory data
+                    self._vulnerabilities.clear()
+                    
+                    # Load data from file into memory
+                    for vuln_id_str, vuln_data in file_data["vulnerabilities"].items():
+                        try:
+                            vuln_id = int(vuln_id_str)
+                            self._vulnerabilities[vuln_id] = vuln_data
+                        except (ValueError, TypeError):
+                            print("Warning: Invalid vulnerability ID: {}".format(vuln_id_str))
+                    
+                    # Update counter to match the highest ID
+                    if self._vulnerabilities:
+                        self._vuln_counter = max(self._vulnerabilities.keys())
+                    
+                    # CRITICAL: Also update self._data to keep it in sync
+                    if hasattr(self, '_data'):
+                        self._data["vulnerabilities"] = file_data["vulnerabilities"]
+                        self._data["vuln_counter"] = self._vuln_counter
+                    
+                    # print("Loaded {} vulnerabilities from file and synced with _data".format(len(self._vulnerabilities)))
             self._vuln_table_model.setRowCount(0)
             
-            # Get current filter
-            selected_filter = str(self._cwe_filter.getSelectedItem())
+            # Get current CWE filter
+            selected_cwe_filter = str(self._cwe_filter.getSelectedItem())
             filter_cwe = None
-            if selected_filter != "All Vulnerabilities":
-                filter_cwe = selected_filter.split(" - ")[0]
+            if selected_cwe_filter != "All Vulnerabilities":
+                filter_cwe = selected_cwe_filter.split(" - ")[0]
+            
+            # Get current fixed status filter
+            selected_fixed_filter = str(self._fixed_status_filter.getSelectedItem()) if hasattr(self, '_fixed_status_filter') else "All Status"
+            filter_fixed = None
+            if selected_fixed_filter == "Fixed":
+                filter_fixed = True
+            elif selected_fixed_filter == "Not Fixed":
+                filter_fixed = False
+            # If "All Status", filter_fixed remains None (show all)
             
             # Add vulnerabilities to table - sorted by timestamp (oldest first)
             with self._vuln_lock:
@@ -7363,8 +7776,13 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                                     reverse=False)  # False = oldest first, True = newest first
                 
                 for vuln_id, vuln in sorted_vulns:
-                    # Apply filter
+                    # Apply CWE filter
                     if filter_cwe and vuln['cwe'] != filter_cwe:
+                        continue
+                    
+                    # Apply fixed status filter
+                    vuln_fixed_status = vuln.get('fixed', False)
+                    if filter_fixed is not None and vuln_fixed_status != filter_fixed:
                         continue
                     
                     # Get note from watch list for this URL
@@ -7384,11 +7802,26 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             # Update stats - show unique requests and total vulnerabilities
             total_count = len(self._vulnerabilities)
             displayed_count = self._vuln_table_model.getRowCount()
-            unique_requests = len(set(v['request_hash'] for v in self._vulnerabilities.values()))
             
+            # Calculate unique requests using URL+method combination
+            unique_request_keys = set()
+            for v in self._vulnerabilities.values():
+                clean_url = self._get_url_without_params(v.get('url', ''))
+                method = v.get('method', 'GET').upper()
+                unique_request_keys.add("{}:{}".format(method, clean_url))
+            unique_requests = len(unique_request_keys)
+            
+            # Create filter description for stats
+            filter_parts = []
             if filter_cwe:
-                self._vuln_stats_label.setText("Showing {} of {} vulnerabilities (filtered by {}) | {} unique requests".format(
-                    displayed_count, total_count, filter_cwe, unique_requests))
+                filter_parts.append("CWE: {}".format(filter_cwe))
+            if filter_fixed is not None:
+                filter_parts.append("Status: {}".format("Fixed" if filter_fixed else "Not Fixed"))
+            
+            if filter_parts:
+                filter_desc = "filtered by {}".format(", ".join(filter_parts))
+                self._vuln_stats_label.setText("Showing {} of {} vulnerabilities ({}) | {} unique requests".format(
+                    displayed_count, total_count, filter_desc, unique_requests))
             else:
                 self._vuln_stats_label.setText("Total: {} vulnerabilities across {} unique requests".format(
                     total_count, unique_requests))
@@ -7400,8 +7833,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error refreshing vulnerability table: {}".format(str(e)))
     
     def _filter_vulnerabilities(self):
-        """Filter vulnerabilities based on selected CWE type"""
-        # Clear search field when using CWE filter
+        """Filter vulnerabilities based on selected CWE type and fixed status"""
+        # Clear search field when using filters
         if hasattr(self, '_vuln_search_field'):
             self._vuln_search_field.setText("")
         
@@ -7460,24 +7893,39 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("All vulnerability data cleared")
     
     def _export_vulnerabilities(self, event):
-        """Export vulnerabilities in selected format - respects current filter"""
+        """Export vulnerabilities in selected format - respects current filters"""
         try:
-            # Get current filter selection
-            selected_filter = str(self._cwe_filter.getSelectedItem())
+            # Get current CWE filter
+            selected_cwe_filter = str(self._cwe_filter.getSelectedItem())
             filter_cwe = None
-            if selected_filter != "All Vulnerabilities":
-                filter_cwe = selected_filter.split(" - ")[0]
+            if selected_cwe_filter != "All Vulnerabilities":
+                filter_cwe = selected_cwe_filter.split(" - ")[0]
+            
+            # Get current fixed status filter
+            selected_fixed_filter = str(self._fixed_status_filter.getSelectedItem()) if hasattr(self, '_fixed_status_filter') else "All Status"
+            filter_fixed = None
+            if selected_fixed_filter == "Fixed":
+                filter_fixed = True
+            elif selected_fixed_filter == "Not Fixed":
+                filter_fixed = False
+            # If "All Status", filter_fixed remains None (show all)
             
             # Get export format
             export_format = str(self._export_format.getSelectedItem())
             
             with self._vuln_lock:
-                # Prepare data for export - apply filter
+                # Prepare data for export - apply both filters (same logic as table display)
                 filtered_vulns = []
                 for vuln_id, vuln in self._vulnerabilities.items():
-                    # Apply the same filter as the table
+                    # Apply CWE filter
                     if filter_cwe and vuln['cwe'] != filter_cwe:
                         continue
+                    
+                    # Apply fixed status filter
+                    vuln_fixed_status = vuln.get('fixed', False)
+                    if filter_fixed is not None and vuln_fixed_status != filter_fixed:
+                        continue
+                    
                     filtered_vulns.append((vuln_id, vuln))
 
                 # Sort by timestamp (oldest first)
@@ -7486,19 +7934,28 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 if len(filtered_vulns) == 0:
                     JOptionPane.showMessageDialog(
                         self._main_panel,
-                        "No vulnerabilities to export with current filter",
+                        "No vulnerabilities to export with current filters",
                         "Nothing to Export",
                         JOptionPane.INFORMATION_MESSAGE
                     )
                     return
 
+                # Create filter description for export confirmation
+                filter_parts = []
+                if filter_cwe:
+                    filter_parts.append("CWE: {}".format(filter_cwe))
+                if filter_fixed is not None:
+                    filter_parts.append("Status: {}".format("Fixed" if filter_fixed else "Not Fixed"))
+                
+                filter_desc = "filtered by {}".format(", ".join(filter_parts)) if filter_parts else "all vulnerabilities"
+
                 # Export based on format
                 if export_format.startswith("Text"):
-                    self._export_as_text(filtered_vulns, filter_cwe)
+                    self._export_as_text(filtered_vulns, filter_desc)
                 elif export_format.startswith("CSV"):
-                    self._export_as_csv(filtered_vulns, filter_cwe)
+                    self._export_as_csv(filtered_vulns, filter_desc)
                 elif export_format.startswith("JSON"):
-                    self._export_as_json(filtered_vulns, filter_cwe)
+                    self._export_as_json(filtered_vulns, filter_desc)
                 
         except Exception as e:
             print("Error exporting vulnerabilities: {}".format(str(e)))
@@ -7509,7 +7966,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 JOptionPane.ERROR_MESSAGE
             )
     
-    def _export_as_text(self, filtered_vulns, filter_cwe):
+    def _export_as_text(self, filtered_vulns, filter_desc):
         """Export URLs as text list (one per line)"""
         try:
             # Extract unique URLs
@@ -7527,10 +7984,11 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             scroll_pane = JScrollPane(text_area)
             scroll_pane.setPreferredSize(Dimension(500, 300))
             
-            # Update dialog title
-            dialog_title = "Export URLs as Text (Copy from text area)"
-            if filter_cwe:
-                dialog_title = "Export {} URLs as Text (Copy from text area)".format(filter_cwe)
+            # Update dialog title with filter description
+            if filter_desc != "all vulnerabilities":
+                dialog_title = "Export URLs as Text ({}) - Copy from text area".format(filter_desc)
+            else:
+                dialog_title = "Export URLs as Text (Copy from text area)"
             
             JOptionPane.showMessageDialog(
                 self._main_panel,
@@ -7539,26 +7997,25 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 JOptionPane.INFORMATION_MESSAGE
             )
             
-            if filter_cwe:
-                print("Exported {} unique URLs for {} vulnerabilities as text".format(len(urls), filter_cwe))
-            else:
-                print("Exported {} unique URLs as text (all vulnerabilities)".format(len(urls)))
+            print("Exported {} unique URLs ({})".format(len(urls), filter_desc))
                 
         except Exception as e:
             print("Error exporting as text: {}".format(str(e)))
             raise
     
-    def _export_as_csv(self, filtered_vulns, filter_cwe):
+    def _export_as_csv(self, filtered_vulns, filter_desc):
         """Export vulnerabilities as CSV file"""
         try:
             # Create file chooser
             file_chooser = JFileChooser()
             file_chooser.setDialogTitle("Save CSV Export")
             
-            # Set default filename
+            # Set default filename based on filters
             default_name = "vulnerabilities_export.csv"
-            if filter_cwe:
-                default_name = "{}_vulnerabilities_export.csv".format(filter_cwe.replace("-", "_"))
+            if filter_desc != "all vulnerabilities":
+                # Create a safe filename from filter description
+                safe_name = filter_desc.replace(" ", "_").replace(":", "").replace(",", "_")
+                default_name = "{}_vulnerabilities_export.csv".format(safe_name)
             file_chooser.setSelectedFile(java.io.File(default_name))
             
             # Add CSV filter
@@ -7606,10 +8063,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     JOptionPane.INFORMATION_MESSAGE
                 )
                 
-                if filter_cwe:
-                    print("Exported {} {} vulnerabilities to CSV: {}".format(len(filtered_vulns), filter_cwe, file_path))
-                else:
-                    print("Exported {} vulnerabilities to CSV: {}".format(len(filtered_vulns), file_path))
+                print("Exported {} vulnerabilities ({}) to CSV: {}".format(len(filtered_vulns), filter_desc, file_path))
             else:
                 print("CSV export cancelled by user")
                 
@@ -7617,7 +8071,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             print("Error exporting as CSV: {}".format(str(e)))
             raise
     
-    def _export_as_json(self, filtered_vulns, filter_cwe):
+    def _export_as_json(self, filtered_vulns, filter_desc):
         """Export vulnerabilities as JSON (original functionality)"""
         try:
             # Prepare data for export (exclude message objects)
@@ -7630,7 +8084,8 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                     'url': vuln['url'],
                     'method': vuln['method'],
                     'timestamp': vuln['timestamp'],
-                    'request_hash': str(vuln['request_hash'])
+                    'request_hash': str(vuln['request_hash']),
+                    'fixed': vuln.get('fixed', False)  # Include fixed status in export
                 }
             
             # Convert to JSON
@@ -7644,9 +8099,10 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
             scroll_pane.setPreferredSize(Dimension(600, 400))
             
             # Update dialog title to show filter info
-            dialog_title = "Export Vulnerabilities as JSON (Copy from text area)"
-            if filter_cwe:
-                dialog_title = "Export {} Vulnerabilities as JSON (Copy from text area)".format(filter_cwe)
+            if filter_desc != "all vulnerabilities":
+                dialog_title = "Export Vulnerabilities as JSON ({}) - Copy from text area".format(filter_desc)
+            else:
+                dialog_title = "Export Vulnerabilities as JSON (Copy from text area)"
             
             JOptionPane.showMessageDialog(
                 self._main_panel,
@@ -7655,10 +8111,7 @@ class BurpExtender(IBurpExtender, ITab, IHttpListener, IContextMenuFactory, IMes
                 JOptionPane.INFORMATION_MESSAGE
             )
             
-            if filter_cwe:
-                print("Exported {} {} vulnerabilities to JSON".format(len(filtered_vulns), filter_cwe))
-            else:
-                print("Exported {} vulnerabilities to JSON (all vulnerabilities)".format(len(filtered_vulns)))
+            print("Exported {} vulnerabilities ({}) to JSON".format(len(filtered_vulns), filter_desc))
                 
         except Exception as e:
             print("Error exporting as JSON: {}".format(str(e)))
@@ -7711,6 +8164,20 @@ class CWEMessageEditorTab(IMessageEditorTab):
         
         top_panel.add(cwe_panel)
         
+        # Fixed status panel
+        fixed_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        fixed_panel.add(JLabel("Mark selected vulnerability as:"))
+        
+        # Mark as Fixed button
+        self._mark_fixed_button = JButton("Mark as Fixed", actionPerformed=self._mark_selected_as_fixed)
+        fixed_panel.add(self._mark_fixed_button)
+        
+        # Mark as Not Fixed button
+        self._mark_not_fixed_button = JButton("Mark as Not Fixed", actionPerformed=self._mark_selected_as_not_fixed)
+        fixed_panel.add(self._mark_not_fixed_button)
+        
+        top_panel.add(fixed_panel)
+        
         # Note panel
         note_panel = JPanel(BorderLayout())
         note_panel.add(JLabel("Note for this request:"), BorderLayout.NORTH)
@@ -7740,10 +8207,16 @@ class CWEMessageEditorTab(IMessageEditorTab):
         center_panel.add(JLabel("Existing vulnerabilities for this request:"), BorderLayout.NORTH)
         
         # Vulnerabilities table for current request
-        column_names = ["CWE", "Description", "Timestamp", "Actions"]
+        column_names = ["CWE", "Description", "Fixed Status", "Timestamp", "Actions"]
         self._request_vuln_model = DefaultTableModel(column_names, 0)
         self._request_vuln_table = JTable(self._request_vuln_model)
         self._request_vuln_table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        
+        # Add custom renderer for fixed status highlighting
+        self._setup_editor_table_renderers()
+        
+        # Add context menu for fixed status management
+        self._request_vuln_table.addMouseListener(self._create_editor_vuln_context_menu_listener())
         
         # Add click handler for remove button
         class RequestTableClickHandler(MouseAdapter):
@@ -7757,8 +8230,8 @@ class CWEMessageEditorTab(IMessageEditorTab):
                     row = table.rowAtPoint(event.getPoint())
                     col = table.columnAtPoint(event.getPoint())
                     
-                    # Check if "Actions" column was clicked
-                    if col == 3 and row >= 0:  # Actions column
+                    # Check if "Actions" column was clicked (now column 4)
+                    if col == 4 and row >= 0:  # Actions column
                         self.extension_parent._remove_request_vulnerability_at_row(row)
         
         self._request_vuln_table.addMouseListener(RequestTableClickHandler(self))
@@ -7787,6 +8260,14 @@ class CWEMessageEditorTab(IMessageEditorTab):
         enabled = isRequest  # Only show for requests, not responses
         return enabled
     
+    def setMessage(self, content, isRequest):
+        """Called when the message changes"""
+        if content is None or not isRequest:
+            # Don't store message, just clear request info
+            self._current_request_info = None
+            self._update_ui_for_request()
+            return
+
     def setMessage(self, content, isRequest):
         """Called when the message changes"""
         if content is None or not isRequest:
@@ -7852,131 +8333,6 @@ class CWEMessageEditorTab(IMessageEditorTab):
             print("Error analyzing request in CWE tab: {}".format(str(e)))
             self._current_request_info = None
             self._update_ui_for_request()
-    
-    def _parse_request_manually(self, content):
-        """Manually parse request if helpers fail"""
-        try:
-            # Handle different types of content objects
-            request_str = ""
-            
-            # If content is IHttpRequestResponse, get the request bytes
-            if hasattr(content, 'getRequest'):
-                request_bytes = content.getRequest()
-                if request_bytes:
-                    if hasattr(request_bytes, 'tostring'):
-                        request_str = request_bytes.tostring()
-                    else:
-                        request_str = ''.join(chr(b & 0xFF) for b in request_bytes)
-                else:
-                    return None
-            else:
-                # Handle raw content - particularly array.array objects
-                if hasattr(content, 'tostring'):
-                    # For array.array objects
-                    request_str = content.tostring()
-                elif isinstance(content, (bytes, bytearray)):
-                    request_str = str(content)
-                elif hasattr(content, '__iter__'):
-                    # Handle byte arrays
-                    try:
-                        request_str = ''.join(chr(b & 0xFF) for b in content)
-                    except:
-                        request_str = str(content)
-                else:
-                    request_str = str(content)
-            
-            if not request_str:
-                return None
-            
-            lines = request_str.split('\n')
-            if len(lines) > 0:
-                first_line = lines[0].strip()
-                parts = first_line.split(' ')
-                if len(parts) >= 2:
-                    method = parts[0]
-                    path = parts[1]
-                    
-                    # Extract host from headers
-                    host = "unknown.host"
-                    for line in lines[1:]:
-                        if line.lower().startswith('host:'):
-                            host = line.split(':', 1)[1].strip()
-                            break
-                    
-                    # Detect protocol from the original request context
-                    # Check if the request was made over HTTPS by examining various indicators
-                    protocol = "http"  # Default to HTTP
-                    
-                    # Method 1: Check if helpers can parse it and get the URL
-                    try:
-                        if hasattr(self._extender, '_helpers'):
-                            temp_request_info = self._extender._helpers.analyzeRequest(self._current_message)
-                            if temp_request_info and hasattr(temp_request_info, 'getUrl'):
-                                temp_url = temp_request_info.getUrl()
-                                if temp_url and hasattr(temp_url, 'getProtocol'):
-                                    detected_protocol = temp_url.getProtocol()
-                                    if detected_protocol in ["http", "https"]:
-                                        protocol = detected_protocol
-                    except:
-                        pass  # Fall back to HTTP if helper analysis fails
-                    
-                    # Method 2: Check for HTTPS indicators in headers if helper method failed
-                    if protocol == "http":  # Only check if we haven't detected HTTPS yet
-                        for line in lines[1:]:
-                            line_lower = line.lower()
-                            # Look for HTTPS-specific headers or indicators
-                            if ('x-forwarded-proto: https' in line_lower or 
-                                'x-forwarded-ssl: on' in line_lower or
-                                'x-scheme: https' in line_lower):
-                                protocol = "https"
-                                break
-                    
-                    # Create a robust request info object
-                    class ManualRequestInfo:
-                        def __init__(self, method, path, host, protocol):
-                            self.method = method
-                            self.path = path
-                            self.host = host
-                            self.protocol = protocol
-                            
-                        def getMethod(self):
-                            return self.method
-                            
-                        def getUrl(self):
-                            # Create a URL object that works with our needs
-                            class ManualURL:
-                                def __init__(self, path, host, protocol):
-                                    self.path = path
-                                    self.host = host
-                                    self.protocol = protocol
-                                    
-                                def getPath(self):
-                                    return self.path
-                                    
-                                def getHost(self):
-                                    return self.host
-                                    
-                                def getProtocol(self):
-                                    return self.protocol
-                                    
-                                def toString(self):
-                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
-                                    
-                                def __str__(self):
-                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
-                                    
-                            return ManualURL(self.path, self.host, self.protocol)
-                    
-                    return ManualRequestInfo(method, path, host, protocol)
-            
-            return None
-        except Exception as e:
-            print("Manual parsing failed: {}".format(str(e)))
-            return None
-
-    def getMessage(self):
-        """Return the current message"""
-        return self._current_message
     
     def _extract_url_manually(self):
         """Extract URL information manually from stored request bytes"""
@@ -8059,6 +8415,224 @@ class CWEMessageEditorTab(IMessageEditorTab):
                         print("DEBUG: Detected HTTPS from pattern: {}".format(pattern))
                         break
             
+            print("DEBUG: Final detected protocol: {}".format(protocol))
+            
+            return {
+                'protocol': protocol,
+                'host': host,
+                'path': path
+            }
+            
+        except Exception as e:
+            print("DEBUG: Manual URL extraction failed: {}".format(str(e)))
+            return None
+    
+    def _parse_request_manually(self, content):
+        """Manually parse request if helpers fail"""
+        try:
+            # Handle different types of content objects
+            request_str = ""
+            
+            # If content is IHttpRequestResponse, get the request bytes
+            if hasattr(content, 'getRequest'):
+                request_bytes = content.getRequest()
+                if request_bytes:
+                    if hasattr(request_bytes, 'tostring'):
+                        request_str = request_bytes.tostring()
+                    else:
+                        request_str = ''.join(chr(b & 0xFF) for b in request_bytes)
+                else:
+                    return None
+            else:
+                # Handle raw content - particularly array.array objects
+                if hasattr(content, 'tostring'):
+                    # For array.array objects
+                    request_str = content.tostring()
+                elif isinstance(content, (bytes, bytearray)):
+                    request_str = str(content)
+                elif hasattr(content, '__iter__'):
+                    # Handle byte arrays
+                    try:
+                        request_str = ''.join(chr(b & 0xFF) for b in content)
+                    except:
+                        request_str = str(content)
+                else:
+                    request_str = str(content)
+            
+            if not request_str:
+                return None
+            
+            lines = request_str.split('\n')
+            if len(lines) > 0:
+                first_line = lines[0].strip()
+                parts = first_line.split(' ')
+                if len(parts) >= 2:
+                    method = parts[0]
+                    path = parts[1]
+                    
+                    # Extract host from headers
+                    host = "unknown.host"
+                    for line in lines[1:]:
+                        if line.lower().startswith('host:'):
+                            host = line.split(':', 1)[1].strip()
+                            break
+                    
+                    # Detect protocol from the original request context
+                    # Check if the request was made over HTTPS by examining various indicators
+                    protocol = "http"  # Default to HTTP
+                    
+                    # Method 1: Check if helpers can parse it and get the URL
+                    try:
+                        if hasattr(self._extender, '_helpers'):
+                            temp_request_info = self._extender._helpers.analyzeRequest(content)
+                            if temp_request_info and hasattr(temp_request_info, 'getUrl'):
+                                temp_url = temp_request_info.getUrl()
+                                if temp_url and hasattr(temp_url, 'getProtocol'):
+                                    detected_protocol = temp_url.getProtocol()
+                                    if detected_protocol in ["http", "https"]:
+                                        protocol = detected_protocol
+                    except:
+                        pass  # Fall back to HTTP if helper analysis fails
+                    
+                    # Method 2: Check for HTTPS indicators in headers if helper method failed
+                    if protocol == "http":  # Only check if we haven't detected HTTPS yet
+                        for line in lines[1:]:
+                            line_lower = line.lower()
+                            # Look for HTTPS-specific headers or indicators
+                            if ('x-forwarded-proto: https' in line_lower or 
+                                'x-forwarded-ssl: on' in line_lower or
+                                'x-scheme: https' in line_lower):
+                                protocol = "https"
+                                break
+                    
+                    # Create a robust request info object
+                    class ManualRequestInfo:
+                        def __init__(self, method, path, host, protocol):
+                            self.method = method
+                            self.path = path
+                            self.host = host
+                            self.protocol = protocol
+                            
+                        def getMethod(self):
+                            return self.method
+                            
+                        def getUrl(self):
+                            # Create a URL object that works with our needs
+                            class ManualURL:
+                                def __init__(self, path, host, protocol):
+                                    self.path = path
+                                    self.host = host
+                                    self.protocol = protocol
+                                    
+                                def getPath(self):
+                                    return self.path
+                                    
+                                def getHost(self):
+                                    return self.host
+                                    
+                                def getProtocol(self):
+                                    return self.protocol
+                                    
+                                def toString(self):
+                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
+                                    
+                                def __str__(self):
+                                    return "{}://{}{}".format(self.protocol, self.host, self.path)
+                                    
+                            return ManualURL(self.path, self.host, self.protocol)
+                    
+                    return ManualRequestInfo(method, path, host, protocol)
+            
+            return None
+        except Exception as e:
+            print("Manual parsing failed: {}".format(str(e)))
+            return None
+
+    def getMessage(self):
+        """Return the current message"""
+        return self._current_message
+    
+    def _extract_url_manually(self):
+        """Extract URL information manually from stored request bytes"""
+        try:
+            if not hasattr(self, '_original_request_bytes') or not self._original_request_bytes:
+                # print("DEBUG: No original request bytes available")
+                return None
+                
+            # Convert bytes to string
+            request_str = self._original_request_bytes
+            if hasattr(request_str, 'decode'):
+                request_str = request_str.decode('utf-8', errors='ignore')
+            elif not isinstance(request_str, str):
+                request_str = str(request_str)
+                
+            # print("DEBUG: Manual URL extraction from request: {}".format(request_str[:200]))
+            
+            lines = request_str.split('\n')
+            if not lines:
+                return None
+                
+            # Parse first line: METHOD path HTTP/1.1
+            first_line = lines[0].strip()
+            parts = first_line.split(' ')
+            if len(parts) < 2:
+                return None
+                
+            path = parts[1]
+            
+            # Extract host from headers
+            host = "unknown.host"
+            protocol = "http"  # Default
+            
+            for line in lines[1:]:
+                if line.lower().startswith('host:'):
+                    host = line.split(':', 1)[1].strip()
+                    break
+            
+            # print("DEBUG: Extracted host: {}".format(host))
+            
+            # Enhanced HTTPS detection
+            # Method 1: Look for HTTPS indicators in headers
+            request_lower = request_str.lower()
+            https_indicators = [
+                'https://',  # Direct HTTPS URLs in content
+                'x-forwarded-proto: https',
+                'x-forwarded-ssl: on',
+                'x-scheme: https',
+                'x-forwarded-protocol: https',
+                'x-url-scheme: https',
+                'front-end-https: on'
+            ]
+            
+            for indicator in https_indicators:
+                if indicator in request_lower:
+                    protocol = "https"
+                    # print("DEBUG: Detected HTTPS from indicator: {}".format(indicator))
+                    break
+            
+            # Method 2: Check standard HTTPS ports (if host includes port)
+            if ':443' in host:
+                protocol = "https"
+                # print("DEBUG: Detected HTTPS from port 443")
+                # Remove port from host for display
+                host = host.replace(':443', '')
+            
+            # Method 3: Common HTTPS patterns in cookies or content
+            if protocol == "http":  # Only check if not already detected as HTTPS
+                https_patterns = [
+                    'secure;',  # Secure cookie flag
+                    'samesite=none',  # Often used with HTTPS
+                    'redirect_uri=https://',  # OAuth/SSO redirects
+                    'referer: https://',
+                    'origin: https://'
+                ]
+                
+                for pattern in https_patterns:
+                    if pattern in request_lower:
+                        protocol = "https"
+                        # print("DEBUG: Detected HTTPS from pattern: {}".format(pattern))
+                        break
+            
             # Method 4: Check if we can get protocol from the original Burp request_info
             # This is a last resort that might work without causing tab refresh
             if protocol == "http" and hasattr(self, '_current_request_info'):
@@ -8070,12 +8644,12 @@ class CWEMessageEditorTab(IMessageEditorTab):
                             header_str = str(header).lower()
                             if 'https' in header_str:
                                 protocol = "https"
-                                print("DEBUG: Detected HTTPS from request headers")
+                                # print("DEBUG: Detected HTTPS from request headers")
                                 break
                 except:
                     pass  # Ignore if headers method doesn't work
             
-            print("DEBUG: Final detected protocol: {}".format(protocol))
+            # print("DEBUG: Final detected protocol: {}".format(protocol))
             
             return {
                 'protocol': protocol,
@@ -8244,31 +8818,39 @@ class CWEMessageEditorTab(IMessageEditorTab):
         # Clear existing rows
         self._request_vuln_model.setRowCount(0)
         
-        # Get request hash (ignoring query parameters for consistent grouping)
-        request_hash = self._extender._create_request_hash(url, method)
-        
-        # Find vulnerabilities for this request
-        matching_vulns = []
-        with self._extender._vuln_lock:
-            for vuln_id, vuln in self._extender._vulnerabilities.items():
-                if vuln['request_hash'] == request_hash:
-                    matching_vulns.append((vuln_id, vuln))
-        
-        # Sort by timestamp (oldest first)
-        matching_vulns.sort(key=lambda x: x[1].get('timestamp', ''), reverse=False)
-        
-        # Add to table
-        for vuln_id, vuln in matching_vulns:
-            row_data = [
-                vuln['cwe'],
-                vuln['description'],
-                vuln['timestamp'],
-                "Remove"
-            ]
-            self._request_vuln_model.addRow(row_data)
+        # Simple approach like the old code - use request hash
+        if url is None:
+            # No vulnerabilities if we can't get URL
+            count = 0
+        else:
+            # Get request hash (ignoring query parameters for consistent grouping)
+            request_hash = self._extender._create_request_hash(url, method)
+            
+            # Find vulnerabilities for this request using in-memory data
+            matching_vulns = []
+            with self._extender._vuln_lock:
+                for vuln_id, vuln in self._extender._vulnerabilities.items():
+                    if vuln['request_hash'] == request_hash:
+                        matching_vulns.append((vuln_id, vuln))
+            
+            # Sort by timestamp (oldest first)
+            matching_vulns.sort(key=lambda x: x[1].get('timestamp', ''), reverse=False)
+            
+            # Add to table
+            for vuln_id, vuln in matching_vulns:
+                fixed_status = "Fixed" if vuln.get('fixed', False) else "Not Fixed"
+                row_data = [
+                    vuln['cwe'],
+                    vuln['description'],
+                    fixed_status,
+                    vuln['timestamp'],
+                    "Remove"
+                ]
+                self._request_vuln_model.addRow(row_data)
+            
+            count = len(matching_vulns)
         
         # Update stats
-        count = len(matching_vulns)
         if count == 0:
             self._stats_label.setText("No vulnerabilities for this request")
         elif count == 1:
@@ -8281,11 +8863,8 @@ class CWEMessageEditorTab(IMessageEditorTab):
         self._request_vuln_model.setRowCount(0)
     
     def _mark_vulnerability(self, event):
-        """Mark the current request with the selected CWE"""
-        print("Mark vulnerability called - current_request_info: {}".format(self._current_request_info))
-        
+        """Mark the current request as vulnerable to selected CWE"""
         if self._current_request_info is None:
-            print("No request info available")
             JOptionPane.showMessageDialog(
                 self._component,
                 "No request selected",
@@ -8295,7 +8874,6 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         selected_item = str(self._cwe_combo.getSelectedItem())
-        print("Selected CWE item: {}".format(selected_item))
         
         if selected_item == "Select CWE...":
             JOptionPane.showMessageDialog(
@@ -8311,21 +8889,28 @@ class CWEMessageEditorTab(IMessageEditorTab):
             cwe_code = selected_item.split(" - ")[0]
             description = selected_item.split(" - ")[1]
             
-            print("DEBUG: About to call getUrl() in _mark_vulnerability...")
-            url = self._current_request_info.getUrl()
-            print("DEBUG: Successfully got URL: {}".format(str(url)))
+            # Get URL and method - simple approach like old code
+            try:
+                url = self._current_request_info.getUrl()
+                method = self._current_request_info.getMethod()
+            except Exception:
+                JOptionPane.showMessageDialog(
+                    self._component,
+                    "Error extracting URL/method for vulnerability marking",
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE
+                )
+                return
             
-            print("DEBUG: About to call getMethod() in _mark_vulnerability...")
-            method = self._current_request_info.getMethod()
-            print("DEBUG: Successfully got method: {}".format(method))
             # Create hash ignoring query parameters for consistent grouping
             request_hash = self._extender._create_request_hash(url, method)
             
-            # Check for duplicate CWE
+            # Simple duplicate check - only check memory (faster and safer)
             with self._extender._vuln_lock:
+                # Check for duplicates in memory only (avoid file I/O during lock)
                 for vuln_id, vuln in self._extender._vulnerabilities.items():
-                    if (vuln['request_hash'] == request_hash and 
-                        vuln['cwe'] == cwe_code):
+                    if (vuln.get('request_hash') == request_hash and 
+                        vuln.get('cwe') == cwe_code):
                         JOptionPane.showMessageDialog(
                             self._component,
                             "This request is already marked as vulnerable to {}".format(cwe_code),
@@ -8334,34 +8919,51 @@ class CWEMessageEditorTab(IMessageEditorTab):
                         )
                         return
                 
-                # Create unique vulnerability ID using internal counter
+                # Create unique vulnerability ID
                 self._extender._vuln_counter += 1
                 vuln_id = self._extender._vuln_counter
                 
-                # Store vulnerability
-                self._extender._vulnerabilities[vuln_id] = {
+                # Create vulnerability data
+                vuln_data = {
                     'cwe': cwe_code,
                     'description': description,
                     'url': str(url),
                     'method': method,
                     'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'request_hash': request_hash,
-                    'message': None  # We don't have access to the full message object here
+                    'fixed': False
                 }
                 
-                # Save to database
-                save_success = self._extender._save_vulnerability_to_database(vuln_id, self._extender._vulnerabilities[vuln_id])
-                
-                if not save_success:
-                    # Remove from memory if save failed
-                    del self._extender._vulnerabilities[vuln_id]
+                # Store vulnerability in memory
+                self._extender._vulnerabilities[vuln_id] = vuln_data
+            
+            # Save to database (outside of lock to prevent blocking)
+            try:
+                self._extender._save_vulnerability_to_database(vuln_id, vuln_data)
+            except Exception as save_error:
+                # If save fails, remove from memory
+                with self._extender._vuln_lock:
+                    if vuln_id in self._extender._vulnerabilities:
+                        del self._extender._vulnerabilities[vuln_id]
                     self._extender._vuln_counter -= 1
-                    raise Exception("Failed to save vulnerability to file")
+                raise save_error
             
-            # Update the main vulnerabilities tab
+            # Update UI - defer to prevent blocking
+            SwingUtilities.invokeLater(lambda: self._deferred_ui_update_after_vuln_mark(url, method, cwe_code, description))
+            
+        except Exception as e:
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Error marking vulnerability: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+    
+    def _deferred_ui_update_after_vuln_mark(self, url, method, cwe_code, description):
+        """Deferred UI update to prevent freezing during vulnerability marking"""
+        try:
+            # Update tables
             self._extender._refresh_vulnerability_table()
-            
-            # Update this tab's table
             self._update_vulnerabilities_table(url, method)
             
             # Reset combo box
@@ -8375,23 +8977,100 @@ class CWEMessageEditorTab(IMessageEditorTab):
                 JOptionPane.INFORMATION_MESSAGE
             )
             
-            print("Marked vulnerability from CWE tab: {} {} - {} {}".format(method, url, cwe_code, description))
+        except Exception as e:
+            print("Error in deferred UI update: {}".format(str(e)))
+        
+        selected_item = str(self._cwe_combo.getSelectedItem())
+        print("DEBUG: Selected CWE item: {}".format(selected_item))
+        
+        if selected_item == "Select CWE...":
+            print("ERROR: No CWE selected")
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Please select a CWE type",
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+            return
+        
+        try:
+            # Parse CWE code and description
+            cwe_code = selected_item.split(" - ")[0]
+            description = selected_item.split(" - ")[1]
+            print("DEBUG: Parsed CWE code: {}, description: {}".format(cwe_code, description))
+            
+            # Get URL and method - simple approach like old code
+            try:
+                url = self._current_request_info.getUrl()
+                method = self._current_request_info.getMethod()
+            except Exception:
+                JOptionPane.showMessageDialog(
+                    self._component,
+                    "Error extracting URL/method for vulnerability marking",
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE
+                )
+                return
+            
+            # Create hash ignoring query parameters for consistent grouping
+            request_hash = self._extender._create_request_hash(url, method)
+            
+            # Simple duplicate check - only check memory (faster and safer)
+            with self._extender._vuln_lock:
+                # Check for duplicates in memory only (avoid file I/O during lock)
+                for vuln_id, vuln in self._extender._vulnerabilities.items():
+                    if (vuln.get('request_hash') == request_hash and 
+                        vuln.get('cwe') == cwe_code):
+                        JOptionPane.showMessageDialog(
+                            self._component,
+                            "This request is already marked as vulnerable to {}".format(cwe_code),
+                            "Duplicate Vulnerability",
+                            JOptionPane.WARNING_MESSAGE
+                        )
+                        return
+                
+                # Create unique vulnerability ID
+                self._extender._vuln_counter += 1
+                vuln_id = self._extender._vuln_counter
+                
+                # Create vulnerability data
+                vuln_data = {
+                    'cwe': cwe_code,
+                    'description': description,
+                    'url': str(url),
+                    'method': method,
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'request_hash': request_hash,
+                    'fixed': False
+                }
+                
+                # Store vulnerability in memory
+                self._extender._vulnerabilities[vuln_id] = vuln_data
+            
+            # Save to database (outside of lock to prevent blocking)
+            try:
+                self._extender._save_vulnerability_to_database(vuln_id, vuln_data)
+            except Exception as save_error:
+                # If save fails, remove from memory
+                with self._extender._vuln_lock:
+                    if vuln_id in self._extender._vulnerabilities:
+                        del self._extender._vulnerabilities[vuln_id]
+                    self._extender._vuln_counter -= 1
+                raise save_error
+            
+            # Update UI - defer to prevent blocking
+            SwingUtilities.invokeLater(lambda: self._deferred_ui_update_after_vuln_mark(url, method, cwe_code, description))
             
         except Exception as e:
-            print("Error marking vulnerability from CWE tab: {}".format(str(e)))
             JOptionPane.showMessageDialog(
                 self._component,
                 "Error marking vulnerability: {}".format(str(e)),
                 "Error",
                 JOptionPane.ERROR_MESSAGE
             )
-    
     def _add_to_watch_list(self, event):
         """Add the current request path to the watch list"""
-        print("Add to watch list called - current_request_info: {}".format(self._current_request_info))
-        
         if self._current_request_info is None:
-            print("No request info available for watch list")
             JOptionPane.showMessageDialog(
                 self._component,
                 "No request selected",
@@ -8401,6 +9080,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
+            # Simple approach like old code
             url = self._current_request_info.getUrl()
             path = url.getPath()
             
@@ -8422,7 +9102,12 @@ class CWEMessageEditorTab(IMessageEditorTab):
             )
             
         except Exception as e:
-            print("Error adding path to watch list from CWE tab: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Error adding to watch list: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
     
     def _remove_request_vulnerability_at_row(self, row):
         """Remove vulnerability at specified row for current request"""
@@ -8509,7 +9194,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
         print("DEBUG: _save_note called")
         
         if self._current_request_info is None:
-            print("DEBUG: No current request info for save note")
+            # print("DEBUG: No current request info for save note")
             JOptionPane.showMessageDialog(
                 self._component,
                 "No request selected",
@@ -8519,20 +9204,12 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
-            print("DEBUG: About to call getUrl() in _save_note...")
+            # Simple approach like old code
             url = self._current_request_info.getUrl()
-            print("DEBUG: Successfully got URL: {}".format(str(url)))
-            
-            print("DEBUG: About to call toString()...")
             full_url = url.toString()
-            print("DEBUG: Successfully got full_url: {}".format(full_url))
-            
-            print("DEBUG: About to call getPath()...")
             path = url.getPath()
-            print("DEBUG: Successfully got path: {}".format(path))
             
             note_text = self._note_textarea.getText().strip()
-            print("DEBUG: Note text: '{}'".format(note_text))
             
             # Check if the path exists in the watch list first
             if hasattr(self._extender, '_data') and 'watch_list_audit' in self._extender._data:
@@ -8594,6 +9271,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
+            # Simple approach like old code
             url = self._current_request_info.getUrl()
             full_url = url.toString()
             path = url.getPath()
@@ -8629,6 +9307,7 @@ class CWEMessageEditorTab(IMessageEditorTab):
             return
         
         try:
+            # Simple approach like the old code
             url = self._current_request_info.getUrl()
             full_url = url.toString()
             path = url.getPath()
@@ -8639,7 +9318,6 @@ class CWEMessageEditorTab(IMessageEditorTab):
                     if isinstance(item, dict) and (item.get('path') == full_url or item.get('path') == path):
                         note = item.get('note', '')
                         self._note_textarea.setText(note)
-                        print("Loaded note for path {}: '{}'".format(item.get('path'), note))
                         return
             
             # No note found, clear the text area
@@ -8647,6 +9325,272 @@ class CWEMessageEditorTab(IMessageEditorTab):
             
         except Exception as e:
             print("Error loading note for current request: {}".format(str(e)))
+    
+    def _setup_editor_table_renderers(self):
+        """Setup custom table renderer for editor vulnerability table with green highlighting for fixed vulnerabilities"""
+        from java.awt import Color
+        from javax.swing.table import DefaultTableCellRenderer, TableCellRenderer
+        from javax.swing import JButton
+        
+        class EditorVulnHoverRowRenderer(DefaultTableCellRenderer):
+            def __init__(self, extension_parent):
+                DefaultTableCellRenderer.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                component = DefaultTableCellRenderer.getTableCellRendererComponent(
+                    self, table, value, isSelected, hasFocus, row, column
+                )
+                
+                try:
+                    # Get vulnerability data for this row
+                    vuln_data = self.extension_parent._get_editor_vulnerability_at_row(row)
+                    
+                    if vuln_data and vuln_data.get('fixed', False):
+                        # Green background for fixed vulnerabilities (stronger green)
+                        if isSelected:
+                            component.setBackground(Color(150, 220, 150))  # Lighter green when selected
+                        else:
+                            component.setBackground(Color(180, 255, 180))  # Light green background
+                        component.setForeground(Color.BLACK)
+                    else:
+                        # Default colors for non-fixed vulnerabilities
+                        if isSelected:
+                            component.setBackground(table.getSelectionBackground())
+                            component.setForeground(table.getSelectionForeground())
+                        else:
+                            component.setBackground(table.getBackground())
+                            component.setForeground(table.getForeground())
+                            
+                except Exception as e:
+                    # Fallback to default colors
+                    if isSelected:
+                        component.setBackground(table.getSelectionBackground())
+                        component.setForeground(table.getSelectionForeground())
+                    else:
+                        component.setBackground(table.getBackground())
+                        component.setForeground(table.getForeground())
+                
+                return component
+        
+        class EditorRemoveButtonRenderer(JButton, TableCellRenderer):
+            def __init__(self, extension_parent):
+                JButton.__init__(self, "Remove")
+                self.extension_parent = extension_parent
+            
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                try:
+                    # Get vulnerability data for this row
+                    vuln_data = self.extension_parent._get_editor_vulnerability_at_row(row)
+                    
+                    if vuln_data and vuln_data.get('fixed', False):
+                        # Green background for fixed vulnerabilities
+                        if isSelected:
+                            self.setBackground(Color(150, 220, 150))  # Lighter green when selected
+                        else:
+                            self.setBackground(Color(180, 255, 180))  # Light green background
+                        self.setForeground(Color.BLACK)
+                    else:
+                        # Default colors for non-fixed vulnerabilities
+                        if isSelected:
+                            self.setBackground(table.getSelectionBackground())
+                            self.setForeground(table.getSelectionForeground())
+                        else:
+                            self.setBackground(table.getBackground())
+                            self.setForeground(table.getForeground())
+                            
+                except Exception as e:
+                    # Fallback to default colors
+                    if isSelected:
+                        self.setBackground(table.getSelectionBackground())
+                        self.setForeground(table.getSelectionForeground())
+                    else:
+                        self.setBackground(table.getBackground())
+                        self.setForeground(table.getForeground())
+                
+                return self
+        
+        # Apply renderers to appropriate columns
+        text_renderer = EditorVulnHoverRowRenderer(self)
+        button_renderer = EditorRemoveButtonRenderer(self)
+        
+        for i in range(self._request_vuln_table.getColumnCount()):
+            if i == 4:  # Actions column
+                self._request_vuln_table.getColumnModel().getColumn(i).setCellRenderer(button_renderer)
+            else:
+                self._request_vuln_table.getColumnModel().getColumn(i).setCellRenderer(text_renderer)
+    
+    def _create_editor_vuln_context_menu_listener(self):
+        """Create mouse listener for editor vulnerability table right-click context menu"""
+        class EditorVulnTableContextMenuListener(MouseAdapter):
+            def __init__(self, extension_parent):
+                MouseAdapter.__init__(self)
+                self.extension_parent = extension_parent
+            
+            def mousePressed(self, event):
+                if event.isPopupTrigger():
+                    self._show_popup(event)
+            
+            def mouseReleased(self, event):
+                if event.isPopupTrigger():
+                    self._show_popup(event)
+            
+            def _show_popup(self, event):
+                table = event.getSource()
+                point = event.getPoint()
+                row = table.rowAtPoint(point)
+                
+                if row >= 0:
+                    # Select the row if it's not already selected
+                    if row not in table.getSelectedRows():
+                        table.setRowSelectionInterval(row, row)
+                    
+                    # Create context menu
+                    from javax.swing import JPopupMenu, JMenuItem
+                    popup = JPopupMenu()
+                    
+                    # Get vulnerability data for the selected row
+                    vuln_data = self.extension_parent._get_editor_vulnerability_at_row(row)
+                    
+                    if vuln_data:
+                        is_fixed = vuln_data.get('fixed', False)
+                        
+                        if is_fixed:
+                            # Mark as Not Fixed option
+                            mark_not_fixed_item = JMenuItem("Mark as Not Fixed")
+                            mark_not_fixed_item.addActionListener(lambda e: self.extension_parent._mark_editor_vulnerability_as_fixed(row, False))
+                            popup.add(mark_not_fixed_item)
+                        else:
+                            # Mark as Fixed option
+                            mark_fixed_item = JMenuItem("Mark as Fixed")
+                            mark_fixed_item.addActionListener(lambda e: self.extension_parent._mark_editor_vulnerability_as_fixed(row, True))
+                            popup.add(mark_fixed_item)
+                        
+                        popup.addSeparator()
+                    
+                    # Remove option
+                    remove_item = JMenuItem("Remove Vulnerability")
+                    remove_item.addActionListener(lambda e: self.extension_parent._remove_request_vulnerability_at_row(row))
+                    popup.add(remove_item)
+                    
+                    # Show the popup menu
+                    popup.show(table, point.x, point.y)
+        
+        return EditorVulnTableContextMenuListener(self)
+    
+    def _get_editor_vulnerability_at_row(self, row):
+        """Get vulnerability data for a specific table row in the editor tab"""
+        try:
+            if row < 0 or row >= self._request_vuln_model.getRowCount():
+                return None
+            
+            # Get the CWE and timestamp from the table to match with stored data
+            cwe = str(self._request_vuln_model.getValueAt(row, 0))
+            timestamp = str(self._request_vuln_model.getValueAt(row, 3))
+            
+            # Load fresh data from file
+            data = self._extender._load_data_from_file()
+            if data and "vulnerabilities" in data:
+                vulnerabilities_data = data["vulnerabilities"]
+                
+                for vuln_id_str, vuln in vulnerabilities_data.items():
+                    if (vuln.get('cwe') == cwe and 
+                        vuln.get('timestamp') == timestamp):
+                        return vuln
+            
+            return None
+        except Exception as e:
+            print("Error getting editor vulnerability at row {}: {}".format(row, str(e)))
+            return None
+    
+    def _mark_selected_as_fixed(self, event):
+        """Mark the selected vulnerability as fixed"""
+        selected_row = self._request_vuln_table.getSelectedRow()
+        if selected_row >= 0:
+            self._mark_editor_vulnerability_as_fixed(selected_row, True)
+        else:
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Please select a vulnerability to mark as fixed",
+                "No Selection",
+                JOptionPane.WARNING_MESSAGE
+            )
+    
+    def _mark_selected_as_not_fixed(self, event):
+        """Mark the selected vulnerability as not fixed"""
+        selected_row = self._request_vuln_table.getSelectedRow()
+        if selected_row >= 0:
+            self._mark_editor_vulnerability_as_fixed(selected_row, False)
+        else:
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Please select a vulnerability to mark as not fixed",
+                "No Selection",
+                JOptionPane.WARNING_MESSAGE
+            )
+    
+    def _mark_editor_vulnerability_as_fixed(self, row, fixed_status):
+        """Mark a specific vulnerability as fixed or not fixed"""
+        try:
+            if row < 0 or row >= self._request_vuln_model.getRowCount():
+                return
+            
+            # Get the CWE and timestamp from the table to match with stored data
+            cwe = str(self._request_vuln_model.getValueAt(row, 0))
+            timestamp = str(self._request_vuln_model.getValueAt(row, 3))
+            
+            # Load current data
+            data = self._extender._load_data_from_file()
+            if not data or "vulnerabilities" not in data:
+                print("No vulnerability data found")
+                return
+            
+            vulnerabilities_data = data["vulnerabilities"]
+            vuln_id_to_update = None
+            
+            # Find the matching vulnerability
+            for vuln_id_str, vuln in vulnerabilities_data.items():
+                if (vuln.get('cwe') == cwe and 
+                    vuln.get('timestamp') == timestamp):
+                    vuln_id_to_update = vuln_id_str
+                    break
+            
+            if vuln_id_to_update:
+                # Update the fixed status
+                vulnerabilities_data[vuln_id_to_update]['fixed'] = fixed_status
+                
+                # Save the updated data
+                self._extender._save_data_to_file(data)
+                
+                # Update the table display
+                fixed_text = "Fixed" if fixed_status else "Not Fixed"
+                self._request_vuln_model.setValueAt(fixed_text, row, 2)  # Fixed Status column
+                
+                # Refresh the table to update colors
+                self._request_vuln_table.repaint()
+                
+                # Update the main vulnerabilities tab
+                self._extender._refresh_vulnerability_table()
+                
+                # Show success message
+                status_text = "fixed" if fixed_status else "not fixed"
+                JOptionPane.showMessageDialog(
+                    self._component,
+                    "Vulnerability marked as {}".format(status_text),
+                    "Status Updated",
+                    JOptionPane.INFORMATION_MESSAGE
+                )
+            else:
+                print("Could not find vulnerability to update")
+                
+        except Exception as e:
+            print("Error marking vulnerability as fixed: {}".format(str(e)))
+            JOptionPane.showMessageDialog(
+                self._component,
+                "Error updating vulnerability status: {}".format(str(e)),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            )
 
 # Register the extension
 if __name__ in ('__main__', 'main'):
